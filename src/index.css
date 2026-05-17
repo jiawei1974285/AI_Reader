@@ -1,0 +1,281 @@
+@import "tailwindcss";
+
+@theme {
+  /* Reading typography */
+  --font-serif: "Noto Serif SC", "Source Han Serif SC", "Songti SC", "STSong",
+    "SimSun", Georgia, "Times New Roman", serif;
+  --font-sans: "Inter", "PingFang SC", "Microsoft YaHei", "Segoe UI",
+    sans-serif;
+  --font-reading: var(--font-serif);
+
+  /* Paper palette — warm cream, gentle on eyes for long reading */
+  --color-paper: #f6efe0;
+  --color-paper-soft: #faf4e6;
+  --color-paper-edge: #e8dec8;
+
+  /* Ink palette — warm near-black instead of pure black, reads softer on
+   * warm paper without losing contrast */
+  --color-ink: #2a2419;
+  --color-ink-soft: #4a3f30;
+  --color-muted: #8a7e6a;
+
+  /* Accent — subtle warm red used very sparingly (highlights, page numbers) */
+  --color-accent: #963d33;
+}
+
+:root {
+  color-scheme: light;
+}
+
+/* Theme variants. Applied via data-theme on <body>. */
+body[data-theme="white"] {
+  --color-paper: #fbfbfa;
+  --color-paper-soft: #ffffff;
+  --color-paper-edge: #ececea;
+  --color-ink: #1a1a1a;
+  --color-ink-soft: #3a3a3a;
+  --color-muted: #888;
+  --color-accent: #963d33;
+}
+
+body[data-theme="dark"] {
+  color-scheme: dark;
+  --color-paper: #1d1b16;
+  --color-paper-soft: #25221c;
+  --color-paper-edge: #38332a;
+  --color-ink: #d8d2c4;
+  --color-ink-soft: #b8b2a4;
+  --color-muted: #7a7468;
+  --color-accent: #d68a78;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  text-rendering: optimizeLegibility;
+}
+
+/* Phase 0 belt-and-suspenders: EPUB resources (images, fonts) reference
+ * relative paths that can't resolve in the webview, so hide visual elements
+ * that would render as broken-image placeholders. Phase 1+ will serve EPUB
+ * resources via a custom protocol handler. */
+article img,
+article svg,
+article image,
+article picture,
+article video {
+  display: none !important;
+}
+
+/* Classical Chinese book typography for the reading article. Applied via
+ * the .reading class so it doesn't bleed into other UI surfaces. */
+.reading {
+  font-family: var(--font-reading);
+  font-size: 18px;
+  line-height: 2;
+  letter-spacing: 0.02em;
+  color: var(--color-ink);
+  text-align: justify;
+  text-justify: inter-ideograph;
+  /* Allow more breathing on the sides */
+  hyphens: auto;
+  word-break: break-word;
+}
+
+/* Paragraphs: classical Chinese style — 2em first-line indent, no margin
+ * between paragraphs. This is how printed Chinese novels are typeset. */
+.reading p {
+  margin: 0;
+  text-indent: 2em;
+}
+
+/* Provide a tiny vertical breath between paragraphs without breaking the
+ * indented-block aesthetic. */
+.reading p + p {
+  margin-top: 0.25em;
+}
+
+/* Modern article style — no indent, paragraph spacing instead. Applied
+ * when paragraph_indent setting is off. */
+.reading.indent-none p {
+  text-indent: 0;
+  margin-bottom: 1em;
+}
+.reading.indent-none p + p {
+  margin-top: 0;
+}
+
+/* Headings — centered, larger, more space */
+.reading h1,
+.reading h2,
+.reading h3 {
+  text-indent: 0;
+  text-align: center;
+  font-weight: 600;
+  margin-top: 2.5em;
+  margin-bottom: 1.5em;
+  letter-spacing: 0.05em;
+}
+.reading h1 {
+  font-size: 1.6em;
+}
+.reading h2 {
+  font-size: 1.35em;
+}
+.reading h3 {
+  font-size: 1.15em;
+}
+
+/* Blockquotes */
+.reading blockquote {
+  margin: 1.5em 2em;
+  padding-left: 1em;
+  border-left: 2px solid var(--color-paper-edge);
+  color: var(--color-ink-soft);
+  font-style: normal;
+}
+.reading blockquote p {
+  text-indent: 0;
+}
+
+/* Lists in body (rare in novels but possible) */
+.reading ul,
+.reading ol {
+  margin: 0.5em 2em;
+  padding-left: 1em;
+}
+.reading li {
+  margin: 0.3em 0;
+}
+
+/* Strip stylesheet-injected horizontal rules into a more elegant divider */
+.reading hr {
+  border: none;
+  text-align: center;
+  margin: 2em 0;
+}
+.reading hr::before {
+  content: "❦";
+  color: var(--color-muted);
+  font-size: 1.2em;
+}
+
+/* Custom scrollbar — quiet, slim, paper-colored */
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-track {
+  background: transparent;
+}
+*::-webkit-scrollbar-thumb {
+  background: var(--color-paper-edge);
+  border-radius: 5px;
+  border: 2px solid var(--color-paper);
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: var(--color-muted);
+}
+
+/* Text selection — warm wash matching paper */
+::selection {
+  background: rgba(150, 61, 51, 0.18);
+  color: var(--color-ink);
+}
+
+/* Highlights: <mark class="ai-hl ai-hl-<color>"> wrapped by the reader's
+ * highlight engine after a chapter renders. Use a soft wash that doesn't
+ * fight the paper color; box-shadow extends the tint slightly outside the
+ * glyph bounds so consecutive lines link visually. */
+mark.ai-hl {
+  background-color: transparent;
+  color: inherit;
+  padding: 0 1px;
+  border-radius: 2px;
+  box-decoration-break: clone;
+  -webkit-box-decoration-break: clone;
+  cursor: pointer;
+}
+mark.ai-hl-yellow {
+  background-color: rgba(250, 204, 21, 0.42);
+}
+mark.ai-hl-green {
+  background-color: rgba(132, 204, 90, 0.42);
+}
+mark.ai-hl-blue {
+  background-color: rgba(96, 165, 250, 0.42);
+}
+mark.ai-hl-red {
+  background-color: rgba(252, 100, 90, 0.42);
+}
+body[data-theme="dark"] mark.ai-hl-yellow {
+  background-color: rgba(250, 204, 21, 0.55);
+}
+body[data-theme="dark"] mark.ai-hl-green {
+  background-color: rgba(132, 204, 90, 0.55);
+}
+body[data-theme="dark"] mark.ai-hl-blue {
+  background-color: rgba(96, 165, 250, 0.55);
+}
+body[data-theme="dark"] mark.ai-hl-red {
+  background-color: rgba(252, 100, 90, 0.55);
+}
+
+/* Pulse a highlight when the user jumps to it from the annotations panel */
+mark.ai-hl-flash,
+.ai-hl-rect.ai-hl-flash {
+  animation: ai-hl-flash 1.4s ease-out;
+}
+@keyframes ai-hl-flash {
+  0% {
+    box-shadow: 0 0 0 6px rgba(150, 61, 51, 0.4);
+  }
+  100% {
+    box-shadow: 0 0 0 6px rgba(150, 61, 51, 0);
+  }
+}
+
+/* PDF highlight overlay rectangles. Plain semi-transparent fills above the
+ * page so they read as marker-pen ink. `pointer-events: none` so text
+ * selection still works through them; clicks are routed via JS
+ * hit-testing on the parent wrap. */
+.ai-hl-rect {
+  pointer-events: none;
+  border-radius: 1px;
+  z-index: 5;
+}
+.ai-hl-rect-yellow {
+  background: rgba(250, 204, 21, 0.42);
+}
+.ai-hl-rect-green {
+  background: rgba(132, 204, 90, 0.42);
+}
+.ai-hl-rect-blue {
+  background: rgba(96, 165, 250, 0.42);
+}
+.ai-hl-rect-red {
+  background: rgba(252, 100, 90, 0.42);
+}
+body[data-theme="dark"] .ai-hl-rect-yellow {
+  background: rgba(250, 204, 21, 0.55);
+}
+body[data-theme="dark"] .ai-hl-rect-green {
+  background: rgba(132, 204, 90, 0.55);
+}
+body[data-theme="dark"] .ai-hl-rect-blue {
+  background: rgba(96, 165, 250, 0.55);
+}
+body[data-theme="dark"] .ai-hl-rect-red {
+  background: rgba(252, 100, 90, 0.55);
+}
