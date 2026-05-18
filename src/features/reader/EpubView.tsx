@@ -30,6 +30,7 @@ import { LookupBubble } from "./LookupBubble";
 import { MusicSuggestPanel } from "./MusicSuggestPanel";
 import { useReadTimeHeartbeat } from "./useReadTimeHeartbeat";
 import { applyHighlights, captureSelection } from "./highlight";
+import { BookSearch } from "./BookSearch";
 
 type Props = {
   path: string;
@@ -91,8 +92,32 @@ export function EpubView({
   const [lookupSel, setLookupSel] = useState<{
     text: string;
     rect: DOMRect;
+    spineIdx: number;
+    prefix: string;
+    suffix: string;
   } | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  // Ctrl/Cmd+F opens the in-book search bar.
+  // Listen in CAPTURE phase + on window so WebView2's native find toolbar
+  // doesn't intercept the event before we can preventDefault it.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        (e.key === "f" || e.key === "F")
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSearchOpen(true);
+      }
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
 
   // Sync fullscreen state on mount
   useEffect(() => {
@@ -546,19 +571,19 @@ export function EpubView({
 
   if (loading && chapters.length === 0) {
     return (
-      <div className="h-full flex items-center justify-center text-sm text-[var(--color-muted)]">
-        Reading…
+      <div className="app-frame flex items-center justify-center text-sm studio-subtle">
+        正在打开阅读页...
       </div>
     );
   }
 
   if (error && chapters.length === 0) {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-4 px-6 text-center">
+      <div className="app-frame flex flex-col items-center justify-center gap-4 px-6 text-center">
         <p className="text-sm text-red-600 max-w-xl">{error}</p>
         <button
           onClick={onBack}
-          className="text-sm text-[var(--color-muted)] underline underline-offset-4 hover:text-[var(--color-ink)]"
+          className="studio-button"
         >
           返回书架
         </button>
@@ -569,17 +594,17 @@ export function EpubView({
   const head = chapters[0];
 
   return (
-    <div className="relative h-full flex flex-col">
-      <header className="border-b border-[var(--color-paper-edge)] px-8 py-4 flex items-center justify-between bg-[var(--color-paper-soft)]/60 backdrop-blur-sm gap-4">
+    <div className="app-frame relative flex flex-col">
+      <header className="studio-header px-6 py-3.5 flex items-center justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <h2 className="font-serif text-lg leading-tight truncate text-[var(--color-ink)]">
+          <h2 className="studio-title text-lg leading-tight truncate">
             {head?.title}
           </h2>
-          <p className="text-xs text-[var(--color-muted)] truncate mt-0.5 tracking-wide">
+          <p className="text-xs studio-subtle truncate mt-0.5 tracking-wide">
             {head?.author}
           </p>
         </div>
-        <div className="flex items-center gap-3 text-xs text-[var(--color-muted)] flex-shrink-0">
+        <div className="flex items-center gap-1.5 text-xs flex-shrink-0">
           <button
             onClick={() =>
               setSettings((s) => ({
@@ -587,45 +612,52 @@ export function EpubView({
                 toc_sidebar_open: !s.toc_sidebar_open,
               }))
             }
-            className={`hover:text-[var(--color-ink)] transition ${
-              settings.toc_sidebar_open ? "text-[var(--color-ink)]" : ""
+            className={`studio-ghost ${
+              settings.toc_sidebar_open ? "studio-ghost-active" : ""
             }`}
           >
             目录
           </button>
           <button
             onClick={() => setAnnotationsOpen(true)}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-ghost"
           >
             标注{allHighlights.length > 0 ? ` · ${allHighlights.length}` : ""}
           </button>
           <button
+            onClick={() => setSearchOpen(true)}
+            className="studio-ghost"
+            title="本书内查找 (Ctrl+F)"
+          >
+            查找
+          </button>
+          <button
             onClick={() => setChatOpen(true)}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-ghost"
           >
             问 AI
           </button>
           <button
             onClick={() => setMusicSuggestOpen(true)}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-ghost"
           >
             AI 配乐
           </button>
-          <span className="tabular-nums min-w-[4em] text-center">
+          <span className="studio-chip tabular-nums">
             第 {activeIdx + 1} / {total} 章
           </span>
           <button
             onClick={loadPrev}
             disabled={loadingPrev || (chapters[0]?.spine_index ?? 0) <= 0}
-            className="hover:text-[var(--color-ink)] disabled:opacity-30 disabled:cursor-not-allowed transition"
+            className="studio-button disabled:opacity-30 disabled:cursor-not-allowed"
             title="加载上一章"
           >
             {loadingPrev ? "…" : "↑ 上一章"}
           </button>
           <button
             onClick={toggleFullscreen}
-            className={`hover:text-[var(--color-ink)] transition ${
-              fullscreen ? "text-[var(--color-ink)]" : ""
+            className={`studio-ghost ${
+              fullscreen ? "studio-ghost-active" : ""
             }`}
             title={fullscreen ? "退出全屏" : "全屏 (F11)"}
           >
@@ -633,13 +665,13 @@ export function EpubView({
           </button>
           <button
             onClick={() => setSettingsOpen(true)}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-ghost"
           >
             设置
           </button>
           <button
             onClick={onBack}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-button"
           >
             {backLabel}
           </button>
@@ -658,7 +690,7 @@ export function EpubView({
             }
           />
         )}
-        <div ref={scrollRef} className="flex-1 overflow-auto">
+        <div ref={scrollRef} className="reader-page flex-1 overflow-auto">
         <article
           className={`reading mx-auto px-10 md:px-16 py-16 ${
             settings.paragraph_indent ? "" : "indent-none"
@@ -689,6 +721,28 @@ export function EpubView({
         </div>
       </div>
 
+      {/* Chapter progress strip — pinned to the bottom of the reader so
+       *  it's always visible without taking up vertical reading space.
+       *  Pure information; non-interactive. */}
+      {total > 0 && (
+        <div className="flex-shrink-0 px-6 py-1.5 border-t border-[var(--color-paper-edge)] bg-[var(--color-paper-soft)]/60 flex items-center gap-3">
+          <span className="text-[10px] studio-subtle tracking-[0.1em] tabular-nums">
+            第 {activeIdx + 1} 章 / 共 {total} 章
+          </span>
+          <div className="flex-1 h-1 bg-[var(--color-paper-edge)]/40 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-[var(--color-accent)] transition-all"
+              style={{
+                width: `${Math.max(2, Math.min(100, ((activeIdx + 1) / total) * 100))}%`,
+              }}
+            />
+          </div>
+          <span className="text-[10px] studio-subtle tabular-nums w-10 text-right">
+            {Math.round(((activeIdx + 1) / total) * 100)}%
+          </span>
+        </div>
+      )}
+
       {pendingSel && (
         <div
           ref={toolbarRef}
@@ -715,7 +769,13 @@ export function EpubView({
           <button
             onClick={() => {
               if (!pendingSel) return;
-              setLookupSel({ text: pendingSel.selectedText, rect: pendingSel.rect });
+              setLookupSel({
+                text: pendingSel.selectedText,
+                rect: pendingSel.rect,
+                spineIdx: pendingSel.spineIdx,
+                prefix: pendingSel.prefix,
+                suffix: pendingSel.suffix,
+              });
               setPendingSel(null);
               window.getSelection()?.removeAllRanges();
             }}
@@ -727,10 +787,24 @@ export function EpubView({
         </div>
       )}
 
+      {searchOpen && (
+        <BookSearch
+          rootEl={scrollRef.current}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
+
       {lookupSel && (
         <LookupBubble
           selectedText={lookupSel.text}
           rect={lookupSel.rect}
+          bookId={bookId}
+          spineIndex={lookupSel.spineIdx}
+          prefix={lookupSel.prefix}
+          suffix={lookupSel.suffix}
+          onHighlightCreated={(hl) =>
+            setAllHighlights((prev) => [...prev, hl])
+          }
           aiConfigured={
             aiSettings.base_url.trim() !== "" &&
             aiSettings.api_key.trim() !== "" &&

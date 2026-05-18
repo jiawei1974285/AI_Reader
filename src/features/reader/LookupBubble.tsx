@@ -1,33 +1,51 @@
 import { useEffect, useRef, useState } from "react";
-import { ipc } from "@/lib/ipc";
+import { listen, type UnlistenFn } from "@tauri-apps/api/event";
+import { ipc, type ChatDelta, type Highlight } from "@/lib/ipc";
 
 type Props = {
   selectedText: string;
   rect: DOMRect;
+  bookId: number;
+  spineIndex: number;
+  prefix: string;
+  suffix: string;
   aiConfigured: boolean;
   onClose: () => void;
   onOpenSettings: () => void;
+  onHighlightCreated?: (hl: Highlight) => void;
 };
 
 const BUBBLE_WIDTH = 340;
-const BUBBLE_EST_HEIGHT = 140;
+const BUBBLE_EST_HEIGHT = 180;
 
 /**
  * Small one-shot AI bubble for "what does this word/phrase mean?" lookups.
- * Pops near the selection, fetches a 30-50 word explanation, then idles
- * until the user dismisses it (outside click / ESC). For full back-and-
- * forth chat the user can open the dedicated AI panel.
+ * Pops near the selection, fetches a 30-50 word explanation, then waits
+ * for the user to either save it as a highlight, dismiss it with ESC,
+ * or close it manually.
+ *
+ * Outside-click close was removed (per Bug 5 follow-up): users were
+ * losing the AI reply by reflex-clicking back into the reader. ESC and
+ * the × button are the only dismissal paths now.
  */
 export function LookupBubble({
   selectedText,
   rect,
+  bookId,
+  spineIndex,
+  prefix,
+  suffix,
   aiConfigured,
   onClose,
   onOpenSettings,
+  onHighlightCreated,
 }: Props) {
   const [reply, setReply] = useState<string>("");
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [saving, setSaving] = useState<boolean>(false);
+  const [saved, setSaved] = useState<boolean>(false);
+  const [saveErr, setSaveErr] = useState<string | null>(null);
   const bubbleRef = useRef<HTMLDivElement>(null);
 
   // Position: prefer below selection, flip above if it would overflow
@@ -41,53 +59,102 @@ export function LookupBubble({
     Math.min(rawLeft, window.innerWidth - BUBBLE_WIDTH - 8),
   );
 
-  // Kick off the AI lookup as soon as the bubble mounts
+  // Kick off the AI lookup as soon as the bubble mounts. Uses the
+  // streaming endpoint so the user sees text appear immediately instead
+  // of staring at "AI 思考中…" for several seconds while the full reply
+  // is composed server-side. The visual feedback alone makes the
+  // perceived latency feel ~3x faster.
   useEffect(() => {
     if (!aiConfigured) return;
     let cancelled = false;
+    let unlisten: UnlistenFn | null = null;
     setLoading(true);
     setError(null);
+    setReply("");
+
     const trimmed = selectedText.trim().slice(0, 600);
-    ipc
-      .aiChat([
-        {
-          role: "system",
-          content:
-            "你是一个简洁的阅读助手。请用 30-60 字解释、翻译或提供文化背景。中文回答。不要客套话。",
-        },
-        { role: "user", content: trimmed },
-      ])
-      .then((r) => {
-        if (!cancelled) setReply(r);
-      })
-      .catch((e) => {
-        if (!cancelled) setError(String(e));
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false);
-      });
+    const sessionId =
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+
+    (async () => {
+      try {
+        unlisten = await listen<ChatDelta>("chat-delta", (event) => {
+          const p = event.payload;
+          if (p.session_id !== sessionId) return;
+          if (cancelled) return;
+          if (p.error) {
+            setError(p.error);
+            setLoading(false);
+            return;
+          }
+          if (p.delta) {
+            setReply((prev) => prev + p.delta);
+            // First token arrived — clear loading state.
+            setLoading(false);
+          }
+          if (p.done) {
+            setLoading(false);
+          }
+        });
+        await ipc.aiChatStream(
+          [
+            {
+              role: "system",
+              content:
+                "你是一个简洁的阅读助手。请用 30-60 字解释、翻译或提供文化背景。中文回答。不要客套话。",
+            },
+            { role: "user", content: trimmed },
+          ],
+          sessionId,
+        );
+      } catch (e) {
+        if (!cancelled) {
+          setError(String(e));
+          setLoading(false);
+        }
+      }
+    })();
+
     return () => {
       cancelled = true;
+      if (unlisten) unlisten();
     };
   }, [selectedText, aiConfigured]);
 
-  // Outside click + ESC to close
+  // ESC to close. Outside-click no longer dismisses (user kept losing
+  // their AI reply by reflex-clicking back into the reader).
   useEffect(() => {
-    function onMouseDown(e: MouseEvent) {
-      if (bubbleRef.current && !bubbleRef.current.contains(e.target as Node)) {
-        onClose();
-      }
-    }
     function onKey(e: KeyboardEvent) {
       if (e.key === "Escape") onClose();
     }
-    document.addEventListener("mousedown", onMouseDown);
     document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("mousedown", onMouseDown);
-      document.removeEventListener("keydown", onKey);
-    };
+    return () => document.removeEventListener("keydown", onKey);
   }, [onClose]);
+
+  async function saveAsHighlight() {
+    if (saving || saved) return;
+    setSaving(true);
+    setSaveErr(null);
+    try {
+      const hl = await ipc.createHighlight({
+        bookId,
+        spineIndex,
+        selectedText: selectedText.trim(),
+        prefix,
+        suffix,
+        color: "yellow",
+        note: reply.trim(),
+      });
+      onHighlightCreated?.(hl);
+      setSaved(true);
+    } catch (e) {
+      setSaveErr(String(e));
+    } finally {
+      setSaving(false);
+    }
+  }
 
   return (
     <div
@@ -109,6 +176,7 @@ export function LookupBubble({
           onClick={onClose}
           className="w-5 h-5 flex items-center justify-center rounded text-[var(--color-muted)] hover:bg-[var(--color-paper-edge)]/40 transition text-xs"
           aria-label="Close"
+          title="关闭 (ESC)"
         >
           ×
         </button>
@@ -132,9 +200,39 @@ export function LookupBubble({
         ) : error ? (
           <p className="text-xs text-red-600 leading-relaxed">{error}</p>
         ) : (
-          <p className="text-sm text-[var(--color-ink)] leading-relaxed whitespace-pre-wrap">
-            {reply}
-          </p>
+          <>
+            <p className="text-sm text-[var(--color-ink)] leading-relaxed whitespace-pre-wrap">
+              {reply}
+            </p>
+            {reply.trim() !== "" && (
+              <div className="mt-3 pt-2 border-t border-[var(--color-paper-edge)] flex items-center justify-between gap-2">
+                <button
+                  onClick={saveAsHighlight}
+                  disabled={saving || saved}
+                  className={`text-xs px-2 py-1 rounded transition ${
+                    saved
+                      ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)] cursor-default"
+                      : "bg-[var(--color-paper)] text-[var(--color-ink-soft)] border border-[var(--color-paper-edge)] hover:bg-[var(--color-accent)]/10 hover:text-[var(--color-accent)]"
+                  } ${saving ? "opacity-50" : ""}`}
+                  title={
+                    saved
+                      ? "已存到本书的批注里"
+                      : "高亮选中文字 + AI 回答作为笔记保存"
+                  }
+                >
+                  {saved ? "✓ 已存为批注" : saving ? "保存中…" : "✦ 存为批注"}
+                </button>
+                {saveErr && (
+                  <span
+                    className="text-[10px] text-red-600 truncate max-w-[60%]"
+                    title={saveErr}
+                  >
+                    保存失败
+                  </span>
+                )}
+              </div>
+            )}
+          </>
         )}
       </div>
     </div>

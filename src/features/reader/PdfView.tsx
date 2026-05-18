@@ -22,6 +22,7 @@ import { MusicSuggestPanel } from "./MusicSuggestPanel";
 import { useReadTimeHeartbeat } from "./useReadTimeHeartbeat";
 import { ReaderSettingsPanel } from "./ReaderSettings";
 import { captureSelection } from "./highlight";
+import { BookSearch } from "./BookSearch";
 
 // Bundle the pdf.js worker via Vite's URL resolution so it ships with the app
 // in both dev and production builds.
@@ -85,6 +86,28 @@ export function PdfView({
   );
   const [customScale, setCustomScale] = useState(1.0);
   const [fullscreen, setFullscreen] = useState(false);
+  const [searchOpen, setSearchOpen] = useState(false);
+
+  // Ctrl/Cmd+F opens the in-book search bar (current page only — pdf.js
+  // doesn't expose a way to text-search across un-rendered pages without
+  // a heavier integration). Capture phase so WebView2's native find
+  // toolbar doesn't get the event first.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (
+        (e.ctrlKey || e.metaKey) &&
+        !e.shiftKey &&
+        !e.altKey &&
+        (e.key === "f" || e.key === "F")
+      ) {
+        e.preventDefault();
+        e.stopPropagation();
+        setSearchOpen(true);
+      }
+    }
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+  }, []);
   const [toc, setToc] = useState<TocEntry[]>([]);
   const [tocLoading, setTocLoading] = useState(true);
   const [settings, setSettings] = useState<ReaderSettings>(
@@ -97,6 +120,9 @@ export function PdfView({
   const [lookupSel, setLookupSel] = useState<{
     text: string;
     rect: DOMRect;
+    spineIdx: number;
+    prefix: string;
+    suffix: string;
   } | null>(null);
 
   // Annotation state — paralleling EpubView
@@ -348,6 +374,62 @@ export function PdfView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pageNum, numPages]);
 
+  // Mouse-wheel pagination. When the user is at the page's scroll
+  // boundary (top or bottom) and continues to wheel in the same
+  // direction, flip to the prev/next page. While scrolling within a
+  // long page, wheel behaves normally.
+  //
+  // Throttled to one flip per 350ms — without this, a long trackpad
+  // gesture would jump 5+ pages at once.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    let lastFlip = 0;
+    const COOLDOWN_MS = 350;
+    const EDGE_SLOP = 4; // px tolerance when comparing scrollTop to bounds
+
+    function onWheel(e: WheelEvent) {
+      if (!el) return;
+      // Ignore zoom (ctrl+wheel) — that's a future feature, don't hijack
+      if (e.ctrlKey) return;
+      const dy = e.deltaY;
+      if (Math.abs(dy) < 1) return;
+
+      const atTop = el.scrollTop <= EDGE_SLOP;
+      const atBottom =
+        el.scrollTop + el.clientHeight >= el.scrollHeight - EDGE_SLOP;
+
+      const now = Date.now();
+      if (now - lastFlip < COOLDOWN_MS) {
+        // During cooldown still consume the event when at edge so the
+        // page doesn't bounce / scroll past the boundary.
+        if ((dy > 0 && atBottom) || (dy < 0 && atTop)) {
+          e.preventDefault();
+        }
+        return;
+      }
+
+      if (dy > 0 && atBottom && pageNum < (numPages || 1)) {
+        e.preventDefault();
+        lastFlip = now;
+        goTo(pageNum + 1);
+      } else if (dy < 0 && atTop && pageNum > 1) {
+        e.preventDefault();
+        lastFlip = now;
+        goTo(pageNum - 1);
+        // After going back, jump to the bottom of the new page so the
+        // reading rhythm is "page-by-page" not "page+ghost-top".
+        requestAnimationFrame(() => {
+          if (el) el.scrollTop = el.scrollHeight;
+        });
+      }
+    }
+
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageNum, numPages]);
+
   // Compute highlight rects for the current page after each render and
   // whenever the highlights list changes.
   function recomputeRects() {
@@ -595,17 +677,17 @@ export function PdfView({
   }, [highlightRects, pendingFlashId]);
 
   return (
-    <div className="relative h-full flex flex-col">
-      <header className="border-b border-[var(--color-paper-edge)] px-8 py-4 flex items-center justify-between bg-[var(--color-paper-soft)]/60 backdrop-blur-sm gap-4">
+    <div className="app-frame relative flex flex-col">
+      <header className="studio-header px-6 py-3.5 flex items-center justify-between gap-4">
         <div className="min-w-0 flex-1">
-          <h2 className="font-serif text-lg leading-tight truncate text-[var(--color-ink)]">
+          <h2 className="studio-title text-lg leading-tight truncate">
             {fileName}
           </h2>
-          <p className="text-xs text-[var(--color-muted)] mt-0.5 tracking-[0.2em] uppercase">
+          <p className="text-xs studio-subtle mt-0.5 tracking-[0.2em] uppercase">
             PDF
           </p>
         </div>
-        <div className="flex items-center gap-3 text-xs text-[var(--color-muted)] flex-shrink-0">
+        <div className="flex items-center gap-1.5 text-xs flex-shrink-0">
           <button
             onClick={() =>
               setSettings((s) => ({
@@ -613,17 +695,24 @@ export function PdfView({
                 toc_sidebar_open: !s.toc_sidebar_open,
               }))
             }
-            className={`hover:text-[var(--color-ink)] transition ${
-              settings.toc_sidebar_open ? "text-[var(--color-ink)]" : ""
+            className={`studio-ghost ${
+              settings.toc_sidebar_open ? "studio-ghost-active" : ""
             }`}
           >
             目录
           </button>
           <button
             onClick={() => setAnnotationsOpen(true)}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-ghost"
           >
             标注{allHighlights.length > 0 ? ` · ${allHighlights.length}` : ""}
+          </button>
+          <button
+            onClick={() => setSearchOpen(true)}
+            className="studio-ghost"
+            title="本页内查找 (Ctrl+F)"
+          >
+            查找
           </button>
           <button
             onClick={() => {
@@ -633,7 +722,7 @@ export function PdfView({
               setMusicChapterText(tl?.textContent ?? "");
               setMusicSuggestOpen(true);
             }}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-ghost"
           >
             AI 配乐
           </button>
@@ -641,7 +730,7 @@ export function PdfView({
             onClick={() => goTo(pageNum - 1)}
             disabled={pageNum <= 1}
             aria-label="Previous page"
-            className="w-8 h-8 flex items-center justify-center rounded-full border border-[var(--color-paper-edge)] hover:bg-[var(--color-paper-soft)] hover:text-[var(--color-ink)] disabled:opacity-25 disabled:cursor-not-allowed transition"
+            className="studio-icon-button disabled:opacity-25 disabled:cursor-not-allowed"
           >
             ←
           </button>
@@ -668,7 +757,7 @@ export function PdfView({
             onClick={() => goTo(pageNum + 1)}
             disabled={pageNum >= numPages}
             aria-label="Next page"
-            className="w-8 h-8 flex items-center justify-center rounded-full border border-[var(--color-paper-edge)] hover:bg-[var(--color-paper-soft)] hover:text-[var(--color-ink)] disabled:opacity-25 disabled:cursor-not-allowed transition"
+            className="studio-icon-button disabled:opacity-25 disabled:cursor-not-allowed"
           >
             →
           </button>
@@ -677,7 +766,7 @@ export function PdfView({
           <div className="flex items-center gap-1 ml-2 pl-2 border-l border-[var(--color-paper-edge)]">
             <button
               onClick={zoomOut}
-              className="w-7 h-7 flex items-center justify-center rounded hover:bg-[var(--color-paper-edge)]/40 hover:text-[var(--color-ink)] transition"
+              className="studio-icon-button"
               aria-label="缩小"
               title="缩小"
             >
@@ -688,7 +777,7 @@ export function PdfView({
             </span>
             <button
               onClick={zoomIn}
-              className="w-7 h-7 flex items-center justify-center rounded hover:bg-[var(--color-paper-edge)]/40 hover:text-[var(--color-ink)] transition"
+              className="studio-icon-button"
               aria-label="放大"
               title="放大"
             >
@@ -699,9 +788,9 @@ export function PdfView({
                 setDisplayMode("fit-width");
                 setCustomScale(1.0);
               }}
-              className={`px-2 py-1 rounded transition hover:text-[var(--color-ink)] ${
+              className={`studio-ghost ${
                 displayMode === "fit-width"
-                  ? "bg-[var(--color-paper-edge)]/50 text-[var(--color-ink)]"
+                  ? "studio-ghost-active"
                   : ""
               }`}
               title="按宽度适应"
@@ -713,9 +802,9 @@ export function PdfView({
                 setDisplayMode("fit-page");
                 setCustomScale(1.0);
               }}
-              className={`px-2 py-1 rounded transition hover:text-[var(--color-ink)] ${
+              className={`studio-ghost ${
                 displayMode === "fit-page"
-                  ? "bg-[var(--color-paper-edge)]/50 text-[var(--color-ink)]"
+                  ? "studio-ghost-active"
                   : ""
               }`}
               title="整页适应"
@@ -724,9 +813,9 @@ export function PdfView({
             </button>
             <button
               onClick={toggleFullscreen}
-              className={`px-2 py-1 rounded transition hover:text-[var(--color-ink)] ${
+              className={`studio-ghost ${
                 fullscreen
-                  ? "bg-[var(--color-paper-edge)]/50 text-[var(--color-ink)]"
+                  ? "studio-ghost-active"
                   : ""
               }`}
               title={fullscreen ? "退出全屏" : "全屏 (F11)"}
@@ -737,13 +826,13 @@ export function PdfView({
 
           <button
             onClick={() => setSettingsOpen(true)}
-            className="hover:text-[var(--color-ink)] transition ml-2"
+            className="studio-ghost ml-2"
           >
             设置
           </button>
           <button
             onClick={onBack}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-button"
           >
             {backLabel}
           </button>
@@ -764,7 +853,7 @@ export function PdfView({
         )}
         <div
           ref={containerRef}
-          className="flex-1 overflow-auto flex flex-col items-center py-8 px-4"
+          className="reader-page flex-1 overflow-auto flex flex-col items-center py-8 px-4"
         >
           {loading && (
             <div className="text-sm text-[var(--color-muted)] mt-12 tracking-widest">
@@ -827,6 +916,26 @@ export function PdfView({
         </div>
       </div>
 
+      {/* Page progress strip — same pattern as EpubView's chapter strip. */}
+      {numPages > 0 && (
+        <div className="flex-shrink-0 px-6 py-1.5 border-t border-[var(--color-paper-edge)] bg-[var(--color-paper-soft)]/60 flex items-center gap-3">
+          <span className="text-[10px] studio-subtle tracking-[0.1em] tabular-nums">
+            第 {pageNum} 页 / 共 {numPages} 页
+          </span>
+          <div className="flex-1 h-1 bg-[var(--color-paper-edge)]/40 rounded-full overflow-hidden">
+            <div
+              className="h-full bg-[var(--color-accent)] transition-all"
+              style={{
+                width: `${Math.max(2, Math.min(100, (pageNum / numPages) * 100))}%`,
+              }}
+            />
+          </div>
+          <span className="text-[10px] studio-subtle tabular-nums w-10 text-right">
+            {Math.round((pageNum / numPages) * 100)}%
+          </span>
+        </div>
+      )}
+
       {pendingSel && (
         <div
           ref={toolbarRef}
@@ -853,7 +962,13 @@ export function PdfView({
           <button
             onClick={() => {
               if (!pendingSel) return;
-              setLookupSel({ text: pendingSel.selectedText, rect: pendingSel.rect });
+              setLookupSel({
+                text: pendingSel.selectedText,
+                rect: pendingSel.rect,
+                spineIdx: pageNum - 1,
+                prefix: pendingSel.prefix,
+                suffix: pendingSel.suffix,
+              });
               setPendingSel(null);
               window.getSelection()?.removeAllRanges();
             }}
@@ -865,10 +980,24 @@ export function PdfView({
         </div>
       )}
 
+      {searchOpen && (
+        <BookSearch
+          rootEl={containerRef.current}
+          onClose={() => setSearchOpen(false)}
+        />
+      )}
+
       {lookupSel && (
         <LookupBubble
           selectedText={lookupSel.text}
           rect={lookupSel.rect}
+          bookId={bookId}
+          spineIndex={lookupSel.spineIdx}
+          prefix={lookupSel.prefix}
+          suffix={lookupSel.suffix}
+          onHighlightCreated={(hl) =>
+            setAllHighlights((prev) => [...prev, hl])
+          }
           aiConfigured={true}
           onOpenSettings={() => setLookupSel(null)}
           onClose={() => setLookupSel(null)}

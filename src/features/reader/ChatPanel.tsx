@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import {
   ipc,
+  isTauriRuntime,
   type BookIndexStatus,
   type ChatContext,
   type ChatDelta,
@@ -109,6 +110,15 @@ export function ChatPanel({
     }
   }, [messages, loading]);
 
+  // ESC to close (since we removed click-outside in Bug 5 fix).
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   // Fetch index status for this book on mount + when book changes
   useEffect(() => {
     let cancelled = false;
@@ -125,6 +135,7 @@ export function ChatPanel({
 
   // Listen for index progress events
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     let unlisten: UnlistenFn | null = null;
     listen<IndexProgressEvent>("index-progress", (event) => {
       const p = event.payload;
@@ -257,6 +268,21 @@ ${ctx}
     };
 
     try {
+      if (!isTauriRuntime()) {
+        accumulated =
+          "这是浏览器预览模式下的 AI 示例回答。真实流式回答会在 Tauri 应用中显示。";
+        setMessages((prev) => {
+          const arr = prev.slice();
+          const last = arr[arr.length - 1];
+          if (last && last.role === "assistant") {
+            arr[arr.length - 1] = { ...last, content: accumulated };
+          }
+          return arr;
+        });
+        finish(null);
+        return;
+      }
+
       unlistenCtx = await listen<ChatContext>("chat-context", (event) => {
         const p = event.payload;
         if (p.session_id !== sessionId) return;
@@ -334,18 +360,22 @@ ${ctx}
   const isLibraryMode = mode === "library";
 
   return (
-    <div className="absolute inset-0 z-30 flex justify-end" onClick={onClose}>
-      <div className="absolute inset-0 bg-black/10" />
+    // Outer overlay no longer closes on click (Bug 5). Only the × button
+    // and the ESC key dismiss the panel — this prevents accidental loss
+    // of an in-progress AI conversation when the user clicks back into
+    // the reader by reflex. The backdrop still absorbs clicks to prevent
+    // accidental text selection on the reader underneath.
+    <div className="absolute inset-0 z-30 flex justify-end">
+      <div className="absolute inset-0 bg-[var(--color-ink)]/10 backdrop-blur-[2px]" />
       <aside
-        onClick={(e) => e.stopPropagation()}
-        className="relative h-full w-96 lg:w-[420px] bg-[var(--color-paper-soft)] border-l border-[var(--color-paper-edge)] shadow-xl flex flex-col"
+        className="studio-drawer relative h-full w-96 lg:w-[420px] flex flex-col"
       >
         <div className="px-6 py-4 border-b border-[var(--color-paper-edge)] flex items-center justify-between flex-shrink-0">
           <div>
-            <h3 className="font-serif text-lg text-[var(--color-ink)]">
+            <h3 className="studio-title text-lg">
               AI 问答
             </h3>
-            <p className="text-xs text-[var(--color-muted)] mt-0.5 truncate">
+            <p className="text-xs studio-subtle mt-0.5 truncate">
               {mode === "chapter"
                 ? chapterLabel
                 : mode === "book"
@@ -357,7 +387,7 @@ ${ctx}
             {messages.length > 0 && (
               <button
                 onClick={clearHistory}
-                className="text-xs text-[var(--color-muted)] hover:text-[var(--color-ink)] transition underline underline-offset-4"
+                className="studio-ghost"
                 title="清除本会话的所有消息（按当前模式/章节计）"
               >
                 清空
@@ -365,17 +395,17 @@ ${ctx}
             )}
             <button
               onClick={onClose}
-              className="w-7 h-7 flex items-center justify-center rounded-full text-[var(--color-muted)] hover:bg-[var(--color-paper-edge)]/40 transition"
+              className="studio-icon-button"
               aria-label="Close"
             >
-              ×
+              x
             </button>
           </div>
         </div>
 
         {/* Mode picker */}
         <div className="px-4 py-3 border-b border-[var(--color-paper-edge)] flex-shrink-0">
-          <div className="grid grid-cols-3 gap-1 p-1 bg-[var(--color-paper-edge)]/40 rounded-md text-xs">
+          <div className="studio-segmented grid-cols-3">
             {(
               [
                 { v: "chapter", label: "当前章节" },
@@ -386,10 +416,10 @@ ${ctx}
               <button
                 key={opt.v}
                 onClick={() => setMode(opt.v)}
-                className={`px-2 py-1.5 rounded transition ${
+                className={`studio-segment ${
                   mode === opt.v
-                    ? "bg-[var(--color-paper-soft)] text-[var(--color-ink)] shadow-sm"
-                    : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+                    ? "studio-segment-active"
+                    : ""
                 }`}
               >
                 {opt.label}
@@ -409,7 +439,7 @@ ${ctx}
               </p>
               <button
                 onClick={onOpenSettings}
-                className="text-sm text-[var(--color-ink)] underline underline-offset-4 hover:text-[var(--color-accent)]"
+                className="studio-button studio-button-primary"
               >
                 去配置
               </button>
@@ -417,7 +447,7 @@ ${ctx}
           )}
 
           {aiConfigured && needsIndex && !indexing && !isLibraryMode && (
-            <div className="rounded-md border border-[var(--color-paper-edge)] p-4 text-sm leading-relaxed">
+            <div className="studio-panel p-4 text-sm leading-relaxed">
               <p className="text-[var(--color-ink)] mb-3">
                 整本书问答需要先把全书切片做向量索引。
               </p>
@@ -426,7 +456,7 @@ ${ctx}
               </p>
               <button
                 onClick={startIndex}
-                className="px-3 py-1.5 rounded bg-[var(--color-ink)] text-[var(--color-paper)] text-sm font-medium hover:bg-[var(--color-ink-soft)] transition"
+                className="studio-button studio-button-primary"
               >
                 索引本书
               </button>
@@ -439,7 +469,7 @@ ${ctx}
           )}
 
           {aiConfigured && needsIndex && !indexing && isLibraryMode && (
-            <div className="rounded-md border border-[var(--color-paper-edge)] p-4 text-sm leading-relaxed">
+            <div className="studio-panel p-4 text-sm leading-relaxed">
               <p className="text-[var(--color-ink)] mb-2">
                 全书库问答需要先索引你想检索的每本书。
               </p>
@@ -448,7 +478,7 @@ ${ctx}
               </p>
               <button
                 onClick={startIndex}
-                className="px-3 py-1.5 rounded bg-[var(--color-ink)] text-[var(--color-paper)] text-sm font-medium hover:bg-[var(--color-ink-soft)] transition"
+                className="studio-button studio-button-primary"
               >
                 先索引本书
               </button>
@@ -456,7 +486,7 @@ ${ctx}
           )}
 
           {indexing && (
-            <div className="rounded-md border border-[var(--color-paper-edge)] p-4">
+            <div className="studio-panel p-4">
               <p className="text-sm text-[var(--color-ink)] mb-2">索引中…</p>
               {indexProgress && indexProgress.total > 0 ? (
                 <>
@@ -488,7 +518,7 @@ ${ctx}
                     onClick={() =>
                       ask("请用 200 字以内总结这一章的核心内容、关键人物和情节发展。", true)
                     }
-                    className="text-left px-4 py-3 rounded-md border border-[var(--color-paper-edge)] hover:bg-[var(--color-paper-edge)]/30 transition text-sm"
+                    className="studio-card text-left px-4 py-3 transition text-sm"
                   >
                     <span className="text-[var(--color-ink)] font-medium">
                       总结本章
@@ -498,7 +528,7 @@ ${ctx}
                     onClick={() =>
                       ask("这一章引出了哪些值得思考的问题或观点？请列 3-5 个。", true)
                     }
-                    className="text-left px-4 py-3 rounded-md border border-[var(--color-paper-edge)] hover:bg-[var(--color-paper-edge)]/30 transition text-sm"
+                    className="studio-card text-left px-4 py-3 transition text-sm"
                   >
                     <span className="text-[var(--color-ink)] font-medium">
                       提出问题
@@ -512,7 +542,7 @@ ${ctx}
                     onClick={() =>
                       ask("用 5 个要点总结这本书的核心论点或主线。", true)
                     }
-                    className="text-left px-4 py-3 rounded-md border border-[var(--color-paper-edge)] hover:bg-[var(--color-paper-edge)]/30 transition text-sm"
+                    className="studio-card text-left px-4 py-3 transition text-sm"
                   >
                     <span className="text-[var(--color-ink)] font-medium">
                       总览全书
@@ -520,7 +550,7 @@ ${ctx}
                   </button>
                   <button
                     onClick={() => ask("本书最具争议或最反直觉的观点是什么？", true)}
-                    className="text-left px-4 py-3 rounded-md border border-[var(--color-paper-edge)] hover:bg-[var(--color-paper-edge)]/30 transition text-sm"
+                    className="studio-card text-left px-4 py-3 transition text-sm"
                   >
                     <span className="text-[var(--color-ink)] font-medium">
                       最反直觉的观点
@@ -540,6 +570,7 @@ ${ctx}
               role={m.role}
               content={m.content}
               hits={m.hits}
+              bookId={bookId}
               onJumpToChapter={onJumpToChapter}
               onClose={onClose}
             />
@@ -581,12 +612,12 @@ ${ctx}
             }
             disabled={!aiConfigured || loading || needsIndex}
             rows={2}
-            className="flex-1 px-3 py-2 text-sm rounded border border-[var(--color-paper-edge)] bg-[var(--color-paper)] text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-ink)]/40 resize-none disabled:opacity-50"
+            className="studio-textarea flex-1 text-sm resize-none disabled:opacity-50"
           />
           <button
             type="submit"
             disabled={!aiConfigured || loading || !input.trim() || needsIndex}
-            className="px-3 py-1 rounded bg-[var(--color-ink)] text-[var(--color-paper)] text-sm font-medium disabled:opacity-30 disabled:cursor-not-allowed hover:bg-[var(--color-ink-soft)] transition"
+            className="studio-button studio-button-primary disabled:opacity-30 disabled:cursor-not-allowed"
           >
             发送
           </button>
@@ -600,12 +631,14 @@ function MessageBubble({
   role,
   content,
   hits,
+  bookId,
   onJumpToChapter,
   onClose,
 }: {
   role: ChatMessage["role"];
   content: string;
   hits?: ChatHit[];
+  bookId: number;
   onJumpToChapter?: (spineIndex: number) => void;
   onClose?: () => void;
 }) {
@@ -617,10 +650,10 @@ function MessageBubble({
   return (
     <div className={`flex ${isUser ? "justify-end" : "justify-start"}`}>
       <div
-        className={`max-w-[85%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed whitespace-pre-wrap ${
+        className={`max-w-[85%] px-4 py-2.5 rounded-lg text-sm leading-relaxed whitespace-pre-wrap ${
           isUser
-            ? "bg-[var(--color-ink)] text-[var(--color-paper)] rounded-tr-sm"
-            : "bg-[var(--color-paper-edge)]/50 text-[var(--color-ink)] rounded-tl-sm"
+            ? "bg-[var(--color-accent)] text-[var(--color-paper-soft)]"
+            : "bg-[var(--color-paper-edge)]/45 text-[var(--color-ink)]"
         }`}
       >
         {role === "assistant" && hits && hits.length > 0 && onJumpToChapter
@@ -629,7 +662,103 @@ function MessageBubble({
               onClose?.();
             })
           : content}
+        {role === "assistant" && hits && hits.length > 0 && content.trim() !== "" && (
+          <CitationSaveRow hits={hits} bookId={bookId} aiReply={content} />
+        )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Footer row under an AI assistant message: one button per retrieved hit.
+ * Clicking saves a highlight on the corresponding chapter where:
+ *   - selected_text = first ~60 chars of the chunk (a stable anchor)
+ *   - note = the full AI reply
+ *
+ * The highlight then appears in the book's NotesView and, when the user
+ * navigates into that chapter, the matching text gets the yellow
+ * marker overlay (via highlight.ts's indexOf fallback when prefix/suffix
+ * are empty).
+ */
+function CitationSaveRow({
+  hits,
+  bookId,
+  aiReply,
+}: {
+  hits: ChatHit[];
+  bookId: number;
+  aiReply: string;
+}) {
+  const [savedIdx, setSavedIdx] = useState<Set<number>>(new Set());
+  const [savingIdx, setSavingIdx] = useState<number | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  async function save(i: number) {
+    const hit = hits[i];
+    if (!hit) return;
+    setSavingIdx(i);
+    setErr(null);
+    try {
+      const anchor = hit.text.trim().slice(0, 60);
+      await ipc.createHighlight({
+        bookId,
+        spineIndex: hit.spine_index,
+        selectedText: anchor,
+        prefix: "",
+        suffix: "",
+        color: "yellow",
+        note: aiReply.trim(),
+      });
+      setSavedIdx((prev) => {
+        const next = new Set(prev);
+        next.add(i);
+        return next;
+      });
+    } catch (e) {
+      setErr(String(e));
+    } finally {
+      setSavingIdx(null);
+    }
+  }
+
+  return (
+    <div className="mt-2 pt-2 border-t border-[var(--color-ink)]/10 flex flex-wrap items-center gap-1.5">
+      <span className="text-[10px] text-[var(--color-muted)] mr-0.5 tracking-[0.05em]">
+        ✦ 存为批注
+      </span>
+      {hits.map((h, i) => {
+        const saved = savedIdx.has(i);
+        const saving = savingIdx === i;
+        return (
+          <button
+            key={i}
+            type="button"
+            disabled={saved || saving}
+            onClick={(e) => {
+              e.stopPropagation();
+              save(i);
+            }}
+            title={
+              saved
+                ? "已存到这本书的批注里"
+                : `保存到「第 ${h.spine_index + 1} 章」的批注（AI 回答会作为笔记）`
+            }
+            className={`inline-flex items-center px-1.5 py-0.5 text-[10px] rounded transition ${
+              saved
+                ? "bg-[var(--color-accent)]/15 text-[var(--color-accent)] cursor-default"
+                : "bg-[var(--color-paper)] text-[var(--color-ink-soft)] border border-[var(--color-paper-edge)] hover:bg-[var(--color-accent)]/10 hover:text-[var(--color-accent)]"
+            } ${saving ? "opacity-50" : ""}`}
+          >
+            {saved ? `✓ 片段 ${i + 1}` : `片段 ${i + 1}`}
+          </button>
+        );
+      })}
+      {err && (
+        <span className="text-[10px] text-red-600 ml-1" title={err}>
+          保存失败
+        </span>
+      )}
     </div>
   );
 }

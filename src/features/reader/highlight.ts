@@ -78,19 +78,110 @@ export function applyHighlights(root: HTMLElement, highlights: Highlight[]) {
 function wrapOne(root: HTMLElement, hl: Highlight) {
   const target = hl.prefix + hl.selected_text + hl.suffix;
   const fullText = root.textContent ?? "";
+
+  // Tier 1: exact match with context.
   let idx = fullText.indexOf(target);
-  if (idx < 0) {
-    // Fall back to bare selected_text if context doesn't match (book changed)
-    idx = fullText.indexOf(hl.selected_text);
-    if (idx < 0) return;
+  if (idx >= 0) {
+    const start = idx + hl.prefix.length;
+    const end = start + hl.selected_text.length;
+    const range = rangeFromOffsets(root, start, end);
+    if (range) wrapRange(range, hl);
+    return;
+  }
+
+  // Tier 2: bare selected_text exact match.
+  idx = fullText.indexOf(hl.selected_text);
+  if (idx >= 0) {
     const range = rangeFromOffsets(root, idx, idx + hl.selected_text.length);
     if (range) wrapRange(range, hl);
     return;
   }
-  const start = idx + hl.prefix.length;
-  const end = start + hl.selected_text.length;
-  const range = rangeFromOffsets(root, start, end);
-  if (range) wrapRange(range, hl);
+
+  // Tier 3: whitespace-tolerant match. Selections that span paragraph
+  // boundaries get extra newlines inserted into textContent (HTML <p>s
+  // join with "\n" in textContent, but sel.toString() doesn't include
+  // them). NBSP / zero-width chars also bite us. Walk char-by-char and
+  // treat any whitespace as equivalent.
+  const located = findIgnoringWhitespace(fullText, hl.selected_text);
+  if (located) {
+    // Guard: refuse to wrap a range whose actual visible content is
+    // mostly whitespace. Without this, when haystack has a big block of
+    // newlines between two chars that happen to match the query's
+    // first/last visible chars, fallback would wrap that whole gap and
+    // paint the bg as one tall colored bar with no visible text — bug
+    // reported in the "空白竖线" screenshot.
+    const sliceText = fullText.slice(located.start, located.end);
+    const nonWS = sliceText.replace(/[\s ​-‍﻿]/g, "").length;
+    const queryNonWS = hl.selected_text.replace(
+      /[\s ​-‍﻿]/g,
+      "",
+    ).length;
+    // Require we recovered at least 80% of the original visible chars.
+    if (queryNonWS > 0 && nonWS >= Math.max(1, Math.floor(queryNonWS * 0.8))) {
+      const range = rangeFromOffsets(root, located.start, located.end);
+      if (range) wrapRange(range, hl);
+    }
+  }
+}
+
+/**
+ * Find `query` in `haystack` allowing whitespace differences anywhere on
+ * either side: a run of whitespace in haystack can match zero or one
+ * whitespace in query, and vice versa. NBSP ( ), zero-width chars
+ * are treated as whitespace too.
+ *
+ * Returns the [start, end) offsets in haystack where the match starts /
+ * ends, or null if no match.
+ */
+function findIgnoringWhitespace(
+  haystack: string,
+  query: string,
+): { start: number; end: number } | null {
+  const q = query.trim();
+  if (q === "") return null;
+  const isWS = (ch: string): boolean =>
+    ch === " " || ch === "\t" || ch === "\n" || ch === "\r" ||
+    ch === " " || ch === "​" || ch === "‌" ||
+    ch === "‍" || ch === "﻿";
+
+  for (let i = 0; i < haystack.length; i++) {
+    let hi = i;
+    let qi = 0;
+    while (qi < q.length && hi < haystack.length) {
+      const hc = haystack[hi];
+      const qc = q[qi];
+      if (hc === qc) {
+        hi++;
+        qi++;
+        continue;
+      }
+      const hWS = isWS(hc);
+      const qWS = isWS(qc);
+      if (hWS && qWS) {
+        hi++;
+        qi++;
+        continue;
+      }
+      if (hWS) {
+        // Haystack has extra whitespace — skip it.
+        hi++;
+        continue;
+      }
+      if (qWS) {
+        // Query has extra whitespace — skip it.
+        qi++;
+        continue;
+      }
+      break;
+    }
+    // Consume any trailing whitespace in the query that hasn't matched
+    // anything yet — common when query ends with " " and haystack didn't.
+    while (qi < q.length && isWS(q[qi])) qi++;
+    if (qi === q.length) {
+      return { start: i, end: hi };
+    }
+  }
+  return null;
 }
 
 function wrapRange(range: Range, hl: Highlight) {

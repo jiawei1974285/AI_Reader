@@ -4,10 +4,9 @@ import type { Book } from "@/lib/ipc";
 type Props = {
   book: Book;
   onClick: () => void;
+  onRemove?: () => void;
 };
 
-// Stable pseudo-random gradient per book for cover placeholders.
-// Uses title hash so the same book always gets the same color.
 const PLACEHOLDER_HUES = [
   ["#c2a878", "#8a6e4a"],
   ["#a8b89a", "#5e7050"],
@@ -17,6 +16,25 @@ const PLACEHOLDER_HUES = [
   ["#a89ab8", "#5e4d70"],
   ["#9ab8a8", "#506e62"],
 ];
+
+const FORMAT_LABELS: Record<Book["format"], string> = {
+  epub: "EPUB",
+  txt: "TXT",
+  pdf: "PDF",
+  docx: "DOCX",
+  mobi: "MOBI",
+};
+
+// Each format gets its own tinted background so users can scan a grid
+// and pick out formats at a glance. Picked to read on both light and
+// dark covers (semi-transparent over a dark backdrop).
+const FORMAT_COLORS: Record<Book["format"], string> = {
+  epub: "bg-emerald-700/85",
+  pdf: "bg-rose-700/85",
+  mobi: "bg-amber-700/85",
+  docx: "bg-sky-700/85",
+  txt: "bg-stone-700/85",
+};
 
 function formatDuration(ms: number): string {
   const totalMin = Math.floor(ms / 60_000);
@@ -39,20 +57,56 @@ function placeholderColors(title: string): [string, string] {
   return PLACEHOLDER_HUES[idx] as [string, string];
 }
 
-export function BookCard({ book, onClick }: Props) {
+export function BookCard({ book, onClick, onRemove }: Props) {
   const hasCover = !!book.cover_path;
   const coverSrc = hasCover ? convertFileSrc(book.cover_path as string) : "";
   const [c1, c2] = placeholderColors(book.title || book.file_path);
   const firstChar = (book.title || "?").trim().charAt(0) || "?";
 
+  // Wrap the whole card in a div so we can host the hover-revealed
+  // remove button as a sibling rather than nested inside the <button>
+  // (nesting buttons is invalid HTML and would propagate clicks).
   return (
-    <button
-      onClick={onClick}
-      className="text-left bg-[var(--color-paper-soft)] border border-[var(--color-paper-edge)] rounded-md hover:shadow-md hover:border-[var(--color-ink)]/20 hover:-translate-y-0.5 transition flex flex-col overflow-hidden relative"
-    >
+    <div className="relative group">
+      {onRemove && (
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            if (
+              confirm(
+                `从书架移除《${book.title || book.file_path}》？\n（不删除原文件，下次扫描会重新加入）`,
+              )
+            ) {
+              onRemove();
+            }
+          }}
+          aria-label="从书架移除"
+          title="从书架移除（不删除文件）"
+          // Bottom-right corner of the card so it doesn't collide with
+          // format badge (top-left) or category badge (top-right).
+          // Higher z than badges so we always click through.
+          className="absolute bottom-[88px] right-2 z-20 w-6 h-6 rounded-full bg-[var(--color-ink)]/80 text-[var(--color-paper)] text-sm opacity-0 group-hover:opacity-100 hover:bg-red-700 hover:scale-110 transition flex items-center justify-center shadow-md"
+        >
+          ×
+        </button>
+      )}
+      <button
+        onClick={onClick}
+        className="studio-card text-left flex flex-col overflow-hidden relative w-full"
+      >
+      {/* Format badge — always shown, top-left */}
+      <span
+        className={`absolute top-2 left-2 z-10 px-1.5 py-0.5 text-[10px] rounded ${FORMAT_COLORS[book.format]} text-white tracking-[0.08em] font-medium backdrop-blur-sm`}
+        title={`格式：${FORMAT_LABELS[book.format]}`}
+      >
+        {FORMAT_LABELS[book.format]}
+      </span>
+
+      {/* Category badge — only when categorised, top-right */}
       {book.category && book.category.trim() !== "" && (
         <span
-          className="absolute top-2 right-2 z-10 px-1.5 py-0.5 text-[10px] rounded bg-black/40 text-white/90 backdrop-blur-sm"
+          className="absolute top-2 right-2 z-10 px-1.5 py-0.5 text-[10px] rounded bg-[var(--color-ink)]/70 text-[var(--color-paper-soft)] backdrop-blur-sm"
           title={book.category}
         >
           {book.category}
@@ -63,7 +117,7 @@ export function BookCard({ book, onClick }: Props) {
           <img
             src={coverSrc}
             alt={book.title}
-            className="w-full h-full object-cover"
+            className="w-full h-full object-cover transition duration-300 group-hover:scale-[1.025]"
             loading="lazy"
             draggable={false}
           />
@@ -80,24 +134,22 @@ export function BookCard({ book, onClick }: Props) {
           </div>
         )}
       </div>
-      <div className="px-3 py-2.5 flex flex-col gap-1 min-h-[64px]">
+      <div className="px-3 py-2.5 flex flex-col gap-1 min-h-[82px]">
         <h3 className="font-serif text-sm leading-tight line-clamp-2 text-[var(--color-ink)]">
           {book.title}
         </h3>
-        <div className="mt-auto flex items-baseline justify-between gap-2">
-          <p className="text-[11px] text-[var(--color-ink-soft)] line-clamp-1 min-w-0">
-            {book.author || "—"}
+        <p className="text-[11px] text-[var(--color-ink-soft)] line-clamp-1 min-w-0">
+          {book.author || "佚名"}
+        </p>
+        <div className="mt-auto flex items-center justify-end gap-2 pt-1">
+          <p className="text-[10px] text-[var(--color-muted)] tabular-nums flex-shrink-0">
+            {book.read_time_ms > 60_000
+              ? formatDuration(book.read_time_ms)
+              : "未读"}
           </p>
-          {book.read_time_ms > 60_000 && (
-            <p
-              className="text-[10px] text-[var(--color-muted)] tabular-nums flex-shrink-0"
-              title="累计阅读时长"
-            >
-              {formatDuration(book.read_time_ms)}
-            </p>
-          )}
         </div>
       </div>
-    </button>
+      </button>
+    </div>
   );
 }

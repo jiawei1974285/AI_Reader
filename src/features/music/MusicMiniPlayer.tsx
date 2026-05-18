@@ -27,25 +27,25 @@ export function MusicMiniPlayer() {
       style={{ fontFamily: "var(--font-sans)" }}
     >
       <div
-        className={`flex items-center gap-2 px-3 py-2 rounded-full bg-[var(--color-ink)]/95 text-[var(--color-paper)] shadow-xl backdrop-blur-sm transition-all ${
+        className={`flex items-center gap-2 px-3 py-2 rounded-lg bg-[var(--color-ink)]/95 text-[var(--color-paper)] shadow-xl backdrop-blur-sm transition-all border border-[var(--color-paper-edge)]/20 ${
           expanded ? "w-[26rem]" : "w-72"
         }`}
       >
         <button
           onClick={player.togglePlay}
-          className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-full bg-[var(--color-paper)]/15 hover:bg-[var(--color-paper)]/25 transition text-sm"
+          className="w-8 h-8 flex-shrink-0 flex items-center justify-center rounded-md bg-[var(--color-paper)]/15 hover:bg-[var(--color-paper)]/25 transition text-sm"
           aria-label={player.playing ? "暂停" : "播放"}
         >
-          {player.playing ? "⏸" : "▶"}
+          {player.playing ? "Ⅱ" : "▶"}
         </button>
 
         {expanded && (
           <button
             onClick={player.prev}
-            className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-full hover:bg-[var(--color-paper)]/15 transition text-xs"
+            className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-md hover:bg-[var(--color-paper)]/15 transition text-xs"
             aria-label="上一首"
           >
-            ⏮
+            ‹
           </button>
         )}
 
@@ -66,10 +66,10 @@ export function MusicMiniPlayer() {
 
         <button
           onClick={player.next}
-          className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-full hover:bg-[var(--color-paper)]/15 transition text-xs"
+          className="w-7 h-7 flex-shrink-0 flex items-center justify-center rounded-md hover:bg-[var(--color-paper)]/15 transition text-xs"
           aria-label="下一首"
         >
-          ⏭
+          ›
         </button>
 
         <button
@@ -88,7 +88,7 @@ export function MusicMiniPlayer() {
         {expanded && (
           <div className="flex items-center gap-1.5 flex-shrink-0 ml-1">
             <span className="text-[10px] text-[var(--color-paper)]/60">
-              🔊
+              Vol
             </span>
             <input
               type="range"
@@ -106,11 +106,11 @@ export function MusicMiniPlayer() {
         {expanded && (
           <button
             onClick={() => setHidden(true)}
-            className="w-6 h-6 flex-shrink-0 flex items-center justify-center rounded-full text-[var(--color-paper)]/60 hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 transition text-xs"
+            className="w-6 h-6 flex-shrink-0 flex items-center justify-center rounded-md text-[var(--color-paper)]/60 hover:text-[var(--color-paper)] hover:bg-[var(--color-paper)]/10 transition text-xs"
             title="隐藏（不停止播放）"
             aria-label="隐藏"
           >
-            ×
+            x
           </button>
         )}
       </div>

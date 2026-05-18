@@ -6,18 +6,20 @@ import { NotesView } from "@/features/notes/NotesView";
 import { MusicView } from "@/features/music/MusicView";
 import { MusicMiniPlayer } from "@/features/music/MusicMiniPlayer";
 import { MusicPlayerProvider } from "@/features/music/MusicPlayerContext";
+import { StatsView } from "@/features/stats/StatsView";
 import type { Book } from "@/lib/ipc";
 
 type View =
   | { kind: "library" }
   | { kind: "notes" }
   | { kind: "music" }
+  | { kind: "stats" }
   | {
       kind: "reader";
       book: Book;
       initialSpine?: number;
       initialHighlight?: number;
-      returnTo: "library" | "notes";
+      returnTo: "library" | "notes" | "stats";
     };
 
 function App() {
@@ -33,7 +35,12 @@ function AppShell() {
   const [view, setView] = useState<View>({ kind: "library" });
 
   if (view.kind === "reader") {
-    const backLabel = view.returnTo === "notes" ? "返回笔记" : "返回书架";
+    const backLabel =
+      view.returnTo === "notes"
+        ? "返回笔记"
+        : view.returnTo === "stats"
+          ? "返回统计"
+          : "返回书架";
     const onBack = () => setView({ kind: view.returnTo });
 
     if (view.book.format === "pdf") {
@@ -82,6 +89,21 @@ function AppShell() {
     return <MusicView onBack={() => setView({ kind: "library" })} />;
   }
 
+  if (view.kind === "stats") {
+    return (
+      <StatsView
+        onBack={() => setView({ kind: "library" })}
+        onOpenBook={(book) =>
+          setView({
+            kind: "reader",
+            book,
+            returnTo: "stats",
+          })
+        }
+      />
+    );
+  }
+
   return (
     <LibraryView
       onOpenBook={(book) =>
@@ -89,6 +111,7 @@ function AppShell() {
       }
       onOpenNotes={() => setView({ kind: "notes" })}
       onOpenMusic={() => setView({ kind: "music" })}
+      onOpenStats={() => setView({ kind: "stats" })}
     />
   );
 }

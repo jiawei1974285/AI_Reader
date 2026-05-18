@@ -67,27 +67,27 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
   }, [items]);
 
   return (
-    <div className="h-full flex flex-col">
-      <header className="border-b border-[var(--color-paper-edge)] px-8 py-4 flex items-center justify-between bg-[var(--color-paper-soft)]/60 backdrop-blur-sm gap-4">
+    <div className="app-frame flex flex-col">
+      <header className="studio-header px-6 py-4 flex items-center justify-between gap-4">
         <div className="min-w-0">
-          <h2 className="font-serif text-lg leading-tight text-[var(--color-ink)]">
+          <h2 className="studio-title text-2xl leading-tight">
             笔记
           </h2>
-          <p className="text-xs text-[var(--color-muted)] mt-0.5">
+          <p className="text-xs studio-subtle mt-0.5">
             {loading ? "搜索中…" : `${items.length} 条标注，跨 ${grouped.length} 本书`}
           </p>
         </div>
-        <div className="flex items-center gap-3 text-xs text-[var(--color-muted)] flex-shrink-0">
+        <div className="flex items-center gap-2 text-xs flex-shrink-0">
           <input
             type="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="搜索标注或笔记…"
-            className="px-3 py-1.5 rounded-md border border-[var(--color-paper-edge)] bg-[var(--color-paper)] text-sm text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-ink)]/40 w-64"
+            className="studio-input text-sm w-64"
           />
           <button
             onClick={onBack}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-button"
           >
             返回书架
           </button>
@@ -127,7 +127,7 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
                           onOpenBookAtHighlight(book, h.spine_index, h.id)
                         }
                         disabled={!book}
-                        className="w-full text-left p-4 rounded-md bg-[var(--color-paper-soft)] border border-[var(--color-paper-edge)] hover:border-[var(--color-ink)]/20 hover:shadow-md transition flex gap-4 items-start disabled:opacity-50 disabled:cursor-not-allowed"
+                        className="studio-card w-full text-left p-4 flex gap-4 items-start disabled:opacity-50 disabled:cursor-not-allowed"
                       >
                         <span
                           className="block w-1 self-stretch rounded-full flex-shrink-0"

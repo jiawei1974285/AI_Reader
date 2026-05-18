@@ -1,7 +1,5 @@
-import type {
-  AiSettings,
-  ReaderSettings as Settings,
-} from "@/lib/ipc";
+import type { ReactNode } from "react";
+import type { AiSettings, ReaderSettings as Settings } from "@/lib/ipc";
 import { DEFAULT_READER_SETTINGS } from "@/lib/ipc";
 
 type Props = {
@@ -15,9 +13,9 @@ type Props = {
 const AI_PRESETS: { label: string; base_url: string }[] = [
   { label: "OpenAI", base_url: "https://api.openai.com" },
   { label: "DeepSeek", base_url: "https://api.deepseek.com" },
-  { label: "Moonshot Kimi", base_url: "https://api.moonshot.cn" },
+  { label: "Moonshot", base_url: "https://api.moonshot.cn" },
   { label: "智谱", base_url: "https://open.bigmodel.cn/api/paas" },
-  { label: "Claude (Anthropic)", base_url: "https://api.anthropic.com" },
+  { label: "Claude", base_url: "https://api.anthropic.com" },
 ];
 
 export function ReaderSettingsPanel({
@@ -40,25 +38,19 @@ export function ReaderSettingsPanel({
   }
 
   return (
-    <div
-      className="absolute inset-0 z-30 flex justify-end"
-      onClick={onClose}
-    >
-      <div className="absolute inset-0 bg-black/10" />
+    <div className="absolute inset-0 z-30 flex justify-end" onClick={onClose}>
+      <div className="absolute inset-0 bg-[var(--color-ink)]/10 backdrop-blur-[2px]" />
       <div
         onClick={(e) => e.stopPropagation()}
-        className="relative h-full w-80 bg-[var(--color-paper-soft)] border-l border-[var(--color-paper-edge)] shadow-xl overflow-auto"
+        className="studio-drawer relative h-full w-[21rem] bg-[var(--color-paper-soft)] overflow-auto"
       >
         <div className="px-6 py-5 border-b border-[var(--color-paper-edge)] flex items-center justify-between">
-          <h3 className="font-serif text-lg text-[var(--color-ink)]">
-            阅读设置
-          </h3>
-          <button
-            onClick={onClose}
-            className="w-7 h-7 flex items-center justify-center rounded-full text-[var(--color-muted)] hover:bg-[var(--color-paper-edge)]/40 transition"
-            aria-label="Close"
-          >
-            ×
+          <div>
+            <h3 className="studio-title text-lg">阅读设置</h3>
+            <p className="text-xs studio-subtle mt-0.5">排版、主题与 AI 服务</p>
+          </div>
+          <button onClick={onClose} className="studio-icon-button" aria-label="Close">
+            x
           </button>
         </div>
 
@@ -74,10 +66,7 @@ export function ReaderSettingsPanel({
             />
           </Section>
 
-          <Section
-            label="字号"
-            value={`${settings.font_size}px`}
-          >
+          <Section label="字号" value={`${settings.font_size}px`}>
             <input
               type="range"
               min={14}
@@ -85,14 +74,11 @@ export function ReaderSettingsPanel({
               step={1}
               value={settings.font_size}
               onChange={(e) => update("font_size", Number(e.target.value))}
-              className="w-full accent-[var(--color-ink)]"
+              className="w-full accent-[var(--color-accent)]"
             />
           </Section>
 
-          <Section
-            label="行距"
-            value={settings.line_height.toFixed(1)}
-          >
+          <Section label="行距" value={settings.line_height.toFixed(1)}>
             <input
               type="range"
               min={1.4}
@@ -100,14 +86,11 @@ export function ReaderSettingsPanel({
               step={0.1}
               value={settings.line_height}
               onChange={(e) => update("line_height", Number(e.target.value))}
-              className="w-full accent-[var(--color-ink)]"
+              className="w-full accent-[var(--color-accent)]"
             />
           </Section>
 
-          <Section
-            label="栏宽"
-            value={`${settings.column_width} 字`}
-          >
+          <Section label="栏宽" value={`${settings.column_width} 字`}>
             <input
               type="range"
               min={28}
@@ -115,7 +98,7 @@ export function ReaderSettingsPanel({
               step={2}
               value={settings.column_width}
               onChange={(e) => update("column_width", Number(e.target.value))}
-              className="w-full accent-[var(--color-ink)]"
+              className="w-full accent-[var(--color-accent)]"
             />
           </Section>
 
@@ -126,21 +109,21 @@ export function ReaderSettingsPanel({
                 onClick={() => update("theme", "cream")}
                 paper="#f6efe0"
                 ink="#2a2419"
-                label="米黄"
+                label="纸感"
               />
               <ThemeSwatch
                 active={settings.theme === "white"}
                 onClick={() => update("theme", "white")}
                 paper="#fbfbfa"
                 ink="#1a1a1a"
-                label="米白"
+                label="素白"
               />
               <ThemeSwatch
                 active={settings.theme === "dark"}
                 onClick={() => update("theme", "dark")}
-                paper="#1d1b16"
-                ink="#d8d2c4"
-                label="暗墨"
+                paper="#1f1d18"
+                ink="#e3dac8"
+                label="夜读"
               />
             </div>
           </Section>
@@ -151,14 +134,14 @@ export function ReaderSettingsPanel({
               onChange={(v) => update("paragraph_indent", v === "on")}
               options={[
                 { value: "on", label: "缩进 2 字" },
-                { value: "off", label: "无缩进" },
+                { value: "off", label: "段间距" },
               ]}
             />
           </Section>
 
           <button
             onClick={() => onChange(DEFAULT_READER_SETTINGS)}
-            className="text-xs text-[var(--color-muted)] hover:text-[var(--color-ink)] underline underline-offset-4 transition"
+            className="studio-button"
           >
             恢复默认
           </button>
@@ -166,11 +149,9 @@ export function ReaderSettingsPanel({
           {aiSettings && onAiChange && (
             <>
               <div className="pt-4 mt-4 border-t border-[var(--color-paper-edge)]">
-                <h4 className="font-serif text-base text-[var(--color-ink)] mb-1">
-                  AI 接口
-                </h4>
-                <p className="text-xs text-[var(--color-muted)] mb-4 leading-relaxed">
-                  支持 OpenAI 兼容协议。填入 base_url + api_key + model 即可。
+                <h4 className="studio-title text-base mb-1">AI 接口</h4>
+                <p className="text-xs studio-subtle mb-4 leading-relaxed">
+                  支持 OpenAI 兼容协议。填写 base_url、api_key 和 model 即可。
                 </p>
               </div>
 
@@ -180,10 +161,10 @@ export function ReaderSettingsPanel({
                     <button
                       key={p.label}
                       onClick={() => updateAi("base_url", p.base_url)}
-                      className={`px-2 py-1.5 rounded text-xs text-left transition ${
+                      className={`studio-segment text-left ${
                         aiSettings.base_url === p.base_url
-                          ? "bg-[var(--color-paper-soft)] text-[var(--color-ink)] border border-[var(--color-ink)]/30"
-                          : "bg-[var(--color-paper-edge)]/30 text-[var(--color-muted)] hover:bg-[var(--color-paper-edge)]/50 border border-transparent"
+                          ? "studio-segment-active"
+                          : ""
                       }`}
                     >
                       {p.label}
@@ -198,7 +179,7 @@ export function ReaderSettingsPanel({
                   value={aiSettings.base_url}
                   onChange={(e) => updateAi("base_url", e.target.value)}
                   placeholder="https://api.openai.com"
-                  className="w-full px-3 py-1.5 text-xs rounded border border-[var(--color-paper-edge)] bg-[var(--color-paper)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-ink)]/40 font-mono"
+                  className="studio-input w-full text-xs font-mono"
                 />
               </Section>
 
@@ -207,8 +188,8 @@ export function ReaderSettingsPanel({
                   type="password"
                   value={aiSettings.api_key}
                   onChange={(e) => updateAi("api_key", e.target.value)}
-                  placeholder="sk-…"
-                  className="w-full px-3 py-1.5 text-xs rounded border border-[var(--color-paper-edge)] bg-[var(--color-paper)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-ink)]/40 font-mono"
+                  placeholder="sk-..."
+                  className="studio-input w-full text-xs font-mono"
                 />
               </Section>
 
@@ -217,9 +198,34 @@ export function ReaderSettingsPanel({
                   type="text"
                   value={aiSettings.chat_model}
                   onChange={(e) => updateAi("chat_model", e.target.value)}
-                  placeholder="例如 gpt-4o-mini, deepseek-chat, moonshot-v1-32k"
-                  className="w-full px-3 py-1.5 text-xs rounded border border-[var(--color-paper-edge)] bg-[var(--color-paper)] text-[var(--color-ink)] focus:outline-none focus:border-[var(--color-ink)]/40 font-mono"
+                  placeholder="gpt-4o-mini / deepseek-chat"
+                  className="studio-input w-full text-xs font-mono"
                 />
+                <p className="mt-2 text-[10px] studio-subtle leading-relaxed">
+                  ⚡ DeepSeek 用 <span className="font-mono">deepseek-chat</span>{" "}
+                  最快（V3 非思考版）。要更深度的推理可用{" "}
+                  <span className="font-mono">deepseek-reasoner</span>，但开启快速模式时
+                  其思考链会被自动过滤。
+                </p>
+              </Section>
+
+              <Section label="快速模式">
+                <label className="flex items-start gap-3 cursor-pointer select-none">
+                  <input
+                    type="checkbox"
+                    checked={aiSettings.fast_mode ?? true}
+                    onChange={(e) => updateAi("fast_mode", e.target.checked)}
+                    className="mt-1 w-4 h-4 accent-[var(--color-accent)]"
+                  />
+                  <span className="text-xs leading-relaxed">
+                    <span className="text-[var(--color-ink)]">关闭思考链</span>
+                    <span className="block studio-subtle mt-0.5">
+                      在请求里加 <span className="font-mono">enable_thinking: false</span>
+                      ，并过滤回答里 <span className="font-mono">&lt;think&gt;…&lt;/think&gt;</span>{" "}
+                      块。绝大多数阅读问答场景下能大幅提速。
+                    </span>
+                  </span>
+                </label>
               </Section>
             </>
           )}
@@ -236,14 +242,12 @@ function Section({
 }: {
   label: string;
   value?: string;
-  children: React.ReactNode;
+  children: ReactNode;
 }) {
   return (
     <div>
       <div className="flex items-baseline justify-between mb-2">
-        <span className="text-xs text-[var(--color-muted)] tracking-widest">
-          {label}
-        </span>
+        <span className="text-xs studio-subtle tracking-widest">{label}</span>
         {value && (
           <span className="text-xs text-[var(--color-ink-soft)] tabular-nums">
             {value}
@@ -265,15 +269,13 @@ function Segmented<T extends string>({
   options: { value: T; label: string }[];
 }) {
   return (
-    <div className="grid grid-cols-2 gap-1 p-1 bg-[var(--color-paper-edge)]/40 rounded-md">
+    <div className="studio-segmented grid-cols-2">
       {options.map((opt) => (
         <button
           key={opt.value}
           onClick={() => onChange(opt.value)}
-          className={`px-3 py-1.5 rounded text-sm transition ${
-            value === opt.value
-              ? "bg-[var(--color-paper-soft)] text-[var(--color-ink)] shadow-sm"
-              : "text-[var(--color-muted)] hover:text-[var(--color-ink)]"
+          className={`studio-segment ${
+            value === opt.value ? "studio-segment-active" : ""
           }`}
         >
           {opt.label}
@@ -301,17 +303,17 @@ function ThemeSwatch({
       onClick={onClick}
       className={`flex flex-col items-center gap-1.5 p-2 rounded-md border transition ${
         active
-          ? "border-[var(--color-ink)]/50"
-          : "border-[var(--color-paper-edge)] hover:border-[var(--color-ink)]/20"
+          ? "border-[var(--color-accent)] bg-[var(--color-accent)]/8"
+          : "border-[var(--color-paper-edge)] hover:border-[var(--color-accent)]/35"
       }`}
     >
       <div
-        className="w-full h-10 rounded flex items-center justify-center font-serif text-base"
+        className="w-full h-10 rounded flex items-center justify-center font-serif text-base border border-black/5"
         style={{ background: paper, color: ink }}
       >
         文
       </div>
-      <span className="text-[11px] text-[var(--color-muted)]">{label}</span>
+      <span className="text-[11px] studio-subtle">{label}</span>
     </button>
   );
 }

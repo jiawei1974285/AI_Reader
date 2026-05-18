@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
-import { ipc, type TagProgress } from "@/lib/ipc";
+import { ipc, isTauriRuntime, type TagProgress } from "@/lib/ipc";
 import { MUSIC_PLAYABLE, useMusicPlayer } from "./MusicPlayerContext";
 
 type Props = {
@@ -50,6 +50,7 @@ export function MusicView({ onBack }: Props) {
 
   // Listen for tag-progress events while tagging is in flight
   useEffect(() => {
+    if (!isTauriRuntime()) return;
     let unlisten: UnlistenFn | null = null;
     listen<TagProgress>("tag-progress", (event) => {
       setTagProgress(event.payload);
@@ -92,8 +93,12 @@ export function MusicView({ onBack }: Props) {
   }
 
   async function pickRoot() {
-    const selected = await openDialog({ directory: true, multiple: false });
-    if (!selected || typeof selected !== "string") return;
+    let selected = "浏览器预览音乐库";
+    if (isTauriRuntime()) {
+      const picked = await openDialog({ directory: true, multiple: false });
+      if (!picked || typeof picked !== "string") return;
+      selected = picked;
+    }
     await ipc.setMusicRoot(selected);
     setRoot(selected);
     await rescan();
@@ -122,7 +127,7 @@ export function MusicView({ onBack }: Props) {
 
   if (loading) {
     return (
-      <div className="h-full flex items-center justify-center text-sm text-[var(--color-muted)]">
+      <div className="app-frame flex items-center justify-center text-sm studio-subtle">
         Loading…
       </div>
     );
@@ -130,24 +135,24 @@ export function MusicView({ onBack }: Props) {
 
   if (!root) {
     return (
-      <div className="h-full flex flex-col items-center justify-center gap-8 px-6">
+      <div className="app-frame flex flex-col items-center justify-center gap-8 px-6">
         <div className="text-center">
-          <h1 className="font-serif text-4xl mb-3 text-[var(--color-ink)]">
+          <h1 className="studio-title text-4xl mb-3">
             音乐
           </h1>
-          <p className="text-sm text-[var(--color-muted)] tracking-widest">
+          <p className="text-sm studio-subtle tracking-widest">
             选一个文件夹作为音乐库
           </p>
         </div>
         <button
           onClick={pickRoot}
-          className="px-6 py-2.5 rounded-full border border-[var(--color-paper-edge)] bg-[var(--color-paper-soft)] hover:bg-white text-sm font-medium transition"
+          className="studio-button studio-button-primary"
         >
           选择音乐目录
         </button>
         <button
           onClick={onBack}
-          className="text-xs text-[var(--color-muted)] underline underline-offset-4 hover:text-[var(--color-ink)]"
+          className="studio-button"
         >
           返回书架
         </button>
@@ -159,31 +164,31 @@ export function MusicView({ onBack }: Props) {
   }
 
   return (
-    <div className="h-full flex flex-col">
-      <header className="border-b border-[var(--color-paper-edge)] px-8 py-4 flex items-center justify-between bg-[var(--color-paper-soft)]/60 backdrop-blur-sm gap-4">
+    <div className="app-frame flex flex-col">
+      <header className="studio-header px-6 py-4 flex items-center justify-between gap-4">
         <div className="min-w-0">
-          <h2 className="font-serif text-lg leading-tight text-[var(--color-ink)]">
+          <h2 className="studio-title text-2xl leading-tight">
             音乐
           </h2>
           <p
-            className="text-xs text-[var(--color-muted)] truncate max-w-xl mt-0.5"
+            className="text-xs studio-subtle truncate max-w-xl mt-0.5"
             title={root}
           >
             {root} · {player.tracks.length} 首
           </p>
         </div>
-        <div className="flex items-center gap-4 text-xs text-[var(--color-muted)] flex-shrink-0">
+        <div className="flex items-center gap-2 text-xs flex-shrink-0">
           <input
             type="search"
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
             placeholder="搜索…"
-            className="px-3 py-1.5 rounded-md border border-[var(--color-paper-edge)] bg-[var(--color-paper)] text-sm text-[var(--color-ink)] placeholder:text-[var(--color-muted)] focus:outline-none focus:border-[var(--color-ink)]/40 w-48"
+            className="studio-input text-sm w-48"
           />
           <button
             onClick={runTagging}
             disabled={tagging || player.tracks.length === 0}
-            className="hover:text-[var(--color-ink)] disabled:opacity-50 transition"
+            className="studio-button disabled:opacity-50"
             title="批量给所有音乐打情绪标签（一次性 LLM 调用）"
           >
             {tagging
@@ -195,19 +200,19 @@ export function MusicView({ onBack }: Props) {
           <button
             onClick={rescan}
             disabled={scanning}
-            className="hover:text-[var(--color-ink)] disabled:opacity-50 transition"
+            className="studio-button disabled:opacity-50"
           >
             {scanning ? "扫描中…" : "重新扫描"}
           </button>
           <button
             onClick={pickRoot}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-button"
           >
             更换目录
           </button>
           <button
             onClick={onBack}
-            className="hover:text-[var(--color-ink)] transition"
+            className="studio-button"
           >
             返回书架
           </button>
