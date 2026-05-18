@@ -1,0 +1,242 @@
+[
+  {
+    "file": "00-style-a-full-design-board.png",
+    "description": "Complete Calm Paper Studio UI design board",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      0,
+      0,
+      1536,
+      1024
+    ],
+    "size": [
+      1536,
+      1024
+    ]
+  },
+  {
+    "file": "01-library-screen.png",
+    "description": "Library screen with shelf, categories, recommendations",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      15,
+      105,
+      462,
+      573
+    ],
+    "size": [
+      447,
+      468
+    ]
+  },
+  {
+    "file": "02-reader-screen.png",
+    "description": "Reader screen with TOC, reading page, highlight toolbar",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      470,
+      105,
+      867,
+      569
+    ],
+    "size": [
+      397,
+      464
+    ]
+  },
+  {
+    "file": "03-ai-notes-screen.png",
+    "description": "AI Q&A and notes side panels",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      878,
+      105,
+      1233,
+      569
+    ],
+    "size": [
+      355,
+      464
+    ]
+  },
+  {
+    "file": "04-settings-music-screen.png",
+    "description": "Settings drawer and mini music player",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      1245,
+      105,
+      1522,
+      616
+    ],
+    "size": [
+      277,
+      511
+    ]
+  },
+  {
+    "file": "05-color-palette.png",
+    "description": "Color palette swatches",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      17,
+      611,
+      392,
+      815
+    ],
+    "size": [
+      375,
+      204
+    ]
+  },
+  {
+    "file": "06-typography.png",
+    "description": "Typography samples",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      392,
+      611,
+      807,
+      815
+    ],
+    "size": [
+      415,
+      204
+    ]
+  },
+  {
+    "file": "07-buttons.png",
+    "description": "Buttons and icon buttons",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      807,
+      611,
+      1007,
+      815
+    ],
+    "size": [
+      200,
+      204
+    ]
+  },
+  {
+    "file": "08-chips-citations.png",
+    "description": "Chips and citation chip components",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      1007,
+      611,
+      1226,
+      815
+    ],
+    "size": [
+      219,
+      204
+    ]
+  },
+  {
+    "file": "09-segmented-sliders.png",
+    "description": "Segmented controls and sliders",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      1226,
+      611,
+      1519,
+      815
+    ],
+    "size": [
+      293,
+      204
+    ]
+  },
+  {
+    "file": "10-book-card.png",
+    "description": "Book card component",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      17,
+      816,
+      263,
+      998
+    ],
+    "size": [
+      246,
+      182
+    ]
+  },
+  {
+    "file": "11-highlights.png",
+    "description": "Highlight color styles",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      263,
+      816,
+      519,
+      998
+    ],
+    "size": [
+      256,
+      182
+    ]
+  },
+  {
+    "file": "12-drawer-sidebar.png",
+    "description": "Drawer and sidebar component",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      519,
+      816,
+      725,
+      998
+    ],
+    "size": [
+      206,
+      182
+    ]
+  },
+  {
+    "file": "13-chat-bubbles.png",
+    "description": "Chat bubble components",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      725,
+      816,
+      998,
+      998
+    ],
+    "size": [
+      273,
+      182
+    ]
+  },
+  {
+    "file": "14-tooltip.png",
+    "description": "Tooltip component",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      998,
+      816,
+      1208,
+      998
+    ],
+    "size": [
+      210,
+      182
+    ]
+  },
+  {
+    "file": "15-modal-export.png",
+    "description": "Export modal component",
+    "source": "C:\\Users\\jiawei\\.codex\\generated_images\\019e35b7-fa18-78c3-800e-7dce2e9dc4a2\\ig_000199d3765c8bf3016a0aa16a28a4819b8b44a3c90a3a21b5.png",
+    "crop_box": [
+      1208,
+      816,
+      1519,
+      998
+    ],
+    "size": [
+      311,
+      182
+    ]
+  }
+]
