@@ -46,6 +46,7 @@ dependencies = [
 name = "aireader"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "chardetng",
  "docx-rs",
  "encoding_rs",
@@ -2968,8 +2969,6 @@ dependencies = [
 [[package]]
 name = "mobi"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8f3f8e34216126be00a189105bda27462e1743d59cd4e15d6b99ff4af051b1b4"
 dependencies = [
  "encoding",
  "indexmap 1.9.3",

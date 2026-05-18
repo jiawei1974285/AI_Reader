@@ -1,7 +1,37 @@
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use mobi::Mobi;
+use regex::Regex;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
+use std::sync::LazyLock;
 
 use crate::readers::epub::{EpubPreview, TocEntry};
+
+/// Catch panics from the `mobi` crate (which is unmaintained at 0.8 and has
+/// known panic sites on malformed records / certain KF8 variants). Without
+/// this wrapper a panic in command-handler code escapes Tauri's worker and
+/// kills the whole app process — silent crash, no error to the UI.
+///
+/// We don't try to be clever about UnwindSafe: command bodies don't mutate
+/// state across the panic boundary (all DB state is behind Mutex, panic
+/// inside the closure simply poisons nothing here), so AssertUnwindSafe is
+/// the practical wrapper.
+fn guard<T, F: FnOnce() -> Result<T, String>>(label: &str, f: F) -> Result<T, String> {
+    match catch_unwind(AssertUnwindSafe(f)) {
+        Ok(r) => r,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "(无消息)".to_string()
+            };
+            Err(format!("{label} 解析失败 (内部 panic)：{msg}"))
+        }
+    }
+}
 
 /// MOBI 支持采取最小可行策略：
 /// - 元数据：`title()` / `author()` 直接走 mobi crate
@@ -136,6 +166,10 @@ fn title_from_path(path: &Path) -> String {
 /// Read raw MOBI body once; called by both initial / chapter / toc paths.
 /// MOBI is small enough (median ~1-5 MB) that re-parsing per call is fine
 /// and saves us a cache layer.
+///
+/// Returns (title, author, body_html). `body_html` already has images
+/// inlined as `data:` URIs so the webview can render them without needing
+/// to extract anything to disk.
 fn read_body(path: &Path) -> Result<(String, String, String), String> {
     let m = open(path)?;
     let body = m.content_as_string_lossy();
@@ -148,7 +182,84 @@ fn read_body(path: &Path) -> Result<(String, String, String), String> {
         }
     };
     let author = m.author().unwrap_or_default();
+
+    // Collect image records once and rewrite any <img recindex=…> in the
+    // body to inlined data URIs. Errors in image extraction are swallowed
+    // — text is more important than perfect image rendering.
+    let images = collect_image_data_uris(&m);
+    let body = inline_mobi_images(&body, &images);
+
     Ok((title, author, body))
+}
+
+/// Map of `recindex` (1-based, as it appears in MOBI HTML) to a fully
+/// formed `data:image/...;base64,...` URI. `recindex` corresponds to the
+/// N-th image record returned by `image_records()`.
+fn collect_image_data_uris(m: &Mobi) -> Vec<String> {
+    let records = m.image_records();
+    records
+        .iter()
+        .map(|r| {
+            let bytes = r.content;
+            let mime = sniff_image_mime(bytes);
+            format!("data:{};base64,{}", mime, B64.encode(bytes))
+        })
+        .collect()
+}
+
+fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+    if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        "image/jpeg"
+    } else if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
+        "image/png"
+    } else if bytes.starts_with(b"GIF8") {
+        "image/gif"
+    } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
+        "image/webp"
+    } else {
+        "image/jpeg"
+    }
+}
+
+// Three patterns we see in real MOBI files for embedded image refs:
+//   <img recindex="0001"/>                  ← classic MOBI / KF7
+//   <img src="kindle:embed:0001?mime=image/jpeg"/>   ← some KF8
+//   <img src="kindle:embed:0001"/>          ← shorter variant
+static IMG_RECINDEX_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<img\b([^>]*?)\brecindex\s*=\s*["']?(\d+)["']?([^>]*?)/?>"#).unwrap()
+});
+static IMG_KINDLE_EMBED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)<img\b([^>]*?)\bsrc\s*=\s*["']kindle:embed:0*(\d+)[^"']*["']([^>]*?)/?>"#)
+        .unwrap()
+});
+
+fn inline_mobi_images(body: &str, images: &[String]) -> String {
+    if images.is_empty() {
+        return body.to_string();
+    }
+    let pass1 = IMG_RECINDEX_RE.replace_all(body, |caps: &regex::Captures| -> String {
+        replace_with_data_uri(caps, images)
+    });
+    let pass2 = IMG_KINDLE_EMBED_RE.replace_all(&pass1, |caps: &regex::Captures| -> String {
+        replace_with_data_uri(caps, images)
+    });
+    pass2.into_owned()
+}
+
+fn replace_with_data_uri(caps: &regex::Captures, images: &[String]) -> String {
+    let before = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+    let n_str = caps.get(2).map(|m| m.as_str()).unwrap_or("");
+    let after = caps.get(3).map(|m| m.as_str()).unwrap_or("");
+    let Ok(n) = n_str.parse::<usize>() else {
+        return caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string();
+    };
+    if n == 0 || n > images.len() {
+        // No matching image record — drop the tag so we don't show a
+        // broken-image icon.
+        return String::new();
+    }
+    let data_uri = &images[n - 1];
+    format!(r#"<img{} src="{}"{} />"#, before, data_uri, after)
 }
 
 #[tauri::command]
@@ -158,45 +269,55 @@ pub fn read_mobi_initial(path: String) -> Result<EpubPreview, String> {
 
 #[tauri::command]
 pub fn read_mobi_chapter(path: String, spine_index: usize) -> Result<EpubPreview, String> {
-    let p = Path::new(&path);
-    let (title, author, body) = read_body(p)?;
-    let chapters = split_chapters(&body);
-    let total = chapters.len();
-    if spine_index >= total {
-        return Err(format!("spine_index {spine_index} out of range (0..{total})"));
-    }
-    let ch = &chapters[spine_index];
+    guard("MOBI 章节", || {
+        let p = Path::new(&path);
+        let (title, author, body) = read_body(p)?;
+        let chapters = split_chapters(&body);
+        let total = chapters.len();
+        if spine_index >= total {
+            return Err(format!("spine_index {spine_index} out of range (0..{total})"));
+        }
+        let ch = &chapters[spine_index];
 
-    Ok(EpubPreview {
-        title,
-        author,
-        raw_length: body.len(),
-        extracted_length: ch.html.len(),
-        html: ch.html.clone(),
-        spine_index,
-        spine_total: total,
+        Ok(EpubPreview {
+            title,
+            author,
+            raw_length: body.len(),
+            extracted_length: ch.html.len(),
+            html: ch.html.clone(),
+            spine_index,
+            spine_total: total,
+        })
     })
 }
 
 #[tauri::command]
 pub fn get_mobi_toc(path: String) -> Result<Vec<TocEntry>, String> {
-    let p = Path::new(&path);
-    let (_t, _a, body) = read_body(p)?;
-    let chapters = split_chapters(&body);
-    Ok(chapters
-        .iter()
-        .enumerate()
-        .map(|(i, ch)| TocEntry {
-            spine_index: i,
-            label: ch.label.clone(),
-            depth: 0,
-        })
-        .collect())
+    guard("MOBI 目录", || {
+        let p = Path::new(&path);
+        let (_t, _a, body) = read_body(p)?;
+        let chapters = split_chapters(&body);
+        Ok(chapters
+            .iter()
+            .enumerate()
+            .map(|(i, ch)| TocEntry {
+                spine_index: i,
+                label: ch.label.clone(),
+                depth: 0,
+            })
+            .collect())
+    })
 }
 
 /// Used by the library scanner — like EPUB's extract_metadata, returns
 /// (title, author). Errors propagate; scanner already handles fallback.
+/// Wrapped in `guard` so a panic during scan (which iterates every MOBI
+/// in the library) can't take down the whole app.
 pub fn extract_metadata(path: &Path) -> Result<(String, String), String> {
+    guard("MOBI 元数据", || extract_metadata_inner(path))
+}
+
+fn extract_metadata_inner(path: &Path) -> Result<(String, String), String> {
     let m = open(path)?;
     let title = {
         let t = m.title();

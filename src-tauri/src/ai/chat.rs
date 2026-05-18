@@ -18,6 +18,10 @@ struct ChatRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// DeepSeek / Qwen 等支持「关闭思考链」的兼容字段。其他 LLM gateway
+    /// 看不懂会忽略。开启「快速模式」时设为 Some(false)。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -37,6 +41,14 @@ struct AiConfig {
     chat_model: String,
     #[serde(default)]
     temperature: Option<f32>,
+    /// 用户在 AI 设置面板里勾「快速模式」(无思考链) 时为 true。默认为
+    /// true，因为绝大部分阅读助手场景不需要 reasoning。
+    #[serde(default = "default_fast_mode")]
+    fast_mode: bool,
+}
+
+fn default_fast_mode() -> bool {
+    true
 }
 
 fn load_config(state: &State<'_, AppState>) -> Result<AiConfig, String> {
@@ -80,6 +92,7 @@ pub async fn ai_chat(
         messages: &messages,
         stream: false,
         temperature: cfg.temperature,
+        enable_thinking: if cfg.fast_mode { Some(false) } else { None },
     };
 
     let client = reqwest::Client::builder()
@@ -109,7 +122,7 @@ pub async fn ai_chat(
         .choices
         .into_iter()
         .next()
-        .map(|c| c.message.content)
+        .map(|c| strip_thinking(&c.message.content))
         .ok_or_else(|| "API 返回空响应".to_string())
 }
 
@@ -120,6 +133,8 @@ struct StreamingChatRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -268,6 +283,117 @@ pub async fn ai_chat_rag_stream(
     stream_chat_to_events(&cfg, &messages, &session_id, app).await
 }
 
+/// Streaming filter that strips `<think>...</think>` blocks from a token
+/// stream. Some reasoning models (DeepSeek-Reasoner, Qwen-QwQ, etc.) emit
+/// their chain-of-thought wrapped in `<think>` tags even when we ask for
+/// fast mode — the tags may also straddle SSE chunks. This filter
+/// maintains a small pending buffer so a `<think>` opener split across
+/// two chunks is still caught.
+///
+/// We only hold back the tail of `pending` long enough to confirm
+/// whether it's the start of a tag — at most 8 ASCII bytes, since both
+/// `<think>` (7) and `</think>` (8) fit there.
+struct ThinkStripper {
+    in_think: bool,
+    pending: String,
+}
+
+impl ThinkStripper {
+    fn new() -> Self {
+        Self {
+            in_think: false,
+            pending: String::new(),
+        }
+    }
+
+    /// Append `chunk` to the internal buffer and return whatever can
+    /// safely be emitted now (i.e. characters that we've confirmed are
+    /// not the start of a `<think>` tag).
+    fn feed(&mut self, chunk: &str) -> String {
+        self.pending.push_str(chunk);
+        let mut out = String::new();
+        loop {
+            if self.in_think {
+                if let Some(end) = self.pending.find("</think>") {
+                    self.pending.drain(..end + "</think>".len());
+                    self.in_think = false;
+                    continue;
+                }
+                // Hold back the tail (could contain a partial `</think>`)
+                // and drop the rest.
+                let cutoff = self.pending.len().saturating_sub(8);
+                if cutoff > 0 {
+                    self.pending.drain(..cutoff);
+                }
+                return out;
+            } else {
+                if let Some(start) = self.pending.find("<think>") {
+                    out.push_str(&self.pending[..start]);
+                    self.pending.drain(..start + "<think>".len());
+                    self.in_think = true;
+                    continue;
+                }
+                // Hold back last 7 bytes (could be the start of `<think>`).
+                let cutoff = self.pending.len().saturating_sub(7);
+                if cutoff > 0 {
+                    // Tags are ASCII so cutoff is always at a char
+                    // boundary; the bytes before it are safe to emit.
+                    let head: String = self.pending.drain(..cutoff).collect();
+                    out.push_str(&head);
+                }
+                return out;
+            }
+        }
+    }
+
+    /// Drain the remaining buffer at end-of-stream.
+    fn flush(&mut self) -> String {
+        if self.in_think {
+            self.pending.clear();
+            String::new()
+        } else {
+            std::mem::take(&mut self.pending)
+        }
+    }
+}
+
+/// Non-streaming sibling — strips `<think>...</think>` (and the legacy
+/// `<thinking>` variant) from a completed assistant message.
+fn strip_thinking(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    loop {
+        let Some(open) = rest.find("<think>").or_else(|| rest.find("<thinking>")) else {
+            out.push_str(rest);
+            return out;
+        };
+        out.push_str(&rest[..open]);
+        let after_open = if rest[open..].starts_with("<thinking>") {
+            open + "<thinking>".len()
+        } else {
+            open + "<think>".len()
+        };
+        let close = rest[after_open..]
+            .find("</think>")
+            .or_else(|| rest[after_open..].find("</thinking>"));
+        match close {
+            Some(rel) => {
+                let after_close = after_open + rel
+                    + if rest[after_open + rel..].starts_with("</thinking>") {
+                        "</thinking>".len()
+                    } else {
+                        "</think>".len()
+                    };
+                rest = &rest[after_close..];
+            }
+            None => {
+                // Unterminated — drop the rest.
+                return out;
+            }
+        }
+    }
+}
+
 /// Shared streaming worker used by both ai_chat_stream and
 /// ai_chat_rag_stream. Sets `stream: true` on the request, reads the SSE
 /// response chunk-by-chunk, parses `delta.content`, and emits Tauri
@@ -287,6 +413,7 @@ async fn stream_chat_to_events(
         messages,
         stream: true,
         temperature: cfg.temperature,
+        enable_thinking: if cfg.fast_mode { Some(false) } else { None },
     };
 
     let client = reqwest::Client::builder()
@@ -320,6 +447,7 @@ async fn stream_chat_to_events(
 
     let mut stream = resp.bytes_stream();
     let mut buffer = String::new();
+    let mut stripper = ThinkStripper::new();
 
     while let Some(chunk_result) = stream.next().await {
         let bytes = match chunk_result {
@@ -352,6 +480,20 @@ async fn stream_chat_to_events(
                 };
                 let payload = payload.trim();
                 if payload == "[DONE]" {
+                    // Flush any trailing non-think content held in the
+                    // stripper's pending buffer.
+                    let tail = stripper.flush();
+                    if !tail.is_empty() {
+                        let _ = app.emit(
+                            "chat-delta",
+                            ChatDelta {
+                                session_id: session_id.to_string(),
+                                delta: tail,
+                                done: false,
+                                error: None,
+                            },
+                        );
+                    }
                     let _ = app.emit(
                         "chat-delta",
                         ChatDelta {
@@ -367,15 +509,18 @@ async fn stream_chat_to_events(
                     for choice in parsed.choices {
                         if let Some(content) = choice.delta.content {
                             if !content.is_empty() {
-                                let _ = app.emit(
-                                    "chat-delta",
-                                    ChatDelta {
-                                        session_id: session_id.to_string(),
-                                        delta: content,
-                                        done: false,
-                                        error: None,
-                                    },
-                                );
+                                let visible = stripper.feed(&content);
+                                if !visible.is_empty() {
+                                    let _ = app.emit(
+                                        "chat-delta",
+                                        ChatDelta {
+                                            session_id: session_id.to_string(),
+                                            delta: visible,
+                                            done: false,
+                                            error: None,
+                                        },
+                                    );
+                                }
                             }
                         }
                     }
@@ -384,7 +529,19 @@ async fn stream_chat_to_events(
         }
     }
 
-    // Stream ended without [DONE] — emit done anyway
+    // Stream ended without [DONE] — flush + emit done.
+    let tail = stripper.flush();
+    if !tail.is_empty() {
+        let _ = app.emit(
+            "chat-delta",
+            ChatDelta {
+                session_id: session_id.to_string(),
+                delta: tail,
+                done: false,
+                error: None,
+            },
+        );
+    }
     let _ = app.emit(
         "chat-delta",
         ChatDelta {
@@ -869,6 +1026,7 @@ pub async fn ai_chat_rag(
         messages: &messages,
         stream: false,
         temperature: cfg.temperature,
+        enable_thinking: if cfg.fast_mode { Some(false) } else { None },
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
@@ -894,6 +1052,6 @@ pub async fn ai_chat_rag(
         .choices
         .into_iter()
         .next()
-        .map(|c| c.message.content)
+        .map(|c| strip_thinking(&c.message.content))
         .ok_or_else(|| "API 返回空响应".to_string())
 }

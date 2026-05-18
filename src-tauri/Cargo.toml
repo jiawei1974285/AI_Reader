@@ -38,4 +38,12 @@ futures-util = "0.3"
 mobi = "0.8"
 notify = "8"
 notify-debouncer-full = "0.7"
+base64 = "0.22"
+
+# Use a locally-patched fork of `mobi` 0.8 (see vendor/mobi-rs).
+# The upstream crate panics on real-world MOBI files when record offsets
+# are non-monotonic — see vendor/mobi-rs/src/record.rs comment for the
+# specific fix.
+[patch.crates-io]
+mobi = { path = "vendor/mobi-rs" }
 

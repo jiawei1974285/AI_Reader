@@ -45,6 +45,7 @@ pub fn run() {
             commands::scan_library,
             commands::start_library_watcher,
             commands::list_books,
+            commands::remove_book,
             commands::get_book_by_path,
             commands::get_progress,
             commands::save_progress,

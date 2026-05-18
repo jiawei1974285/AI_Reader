@@ -1,8 +1,11 @@
 use ::epub::doc::{EpubDoc, NavPoint};
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine;
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::io::BufReader;
+use std::path::{Component, Path, PathBuf};
 use std::sync::LazyLock;
 
 /// Light-touch metadata extraction used by the library scanner. Does not
@@ -59,6 +62,7 @@ pub fn read_epub_preview(path: String) -> Result<EpubPreview, String> {
 
     let mut chosen_index = 0usize;
     let mut chosen_raw = String::new();
+    let mut chosen_idref = String::new();
     for (idx, item) in spine.iter().enumerate() {
         // EPUB 3: explicit nav document is the TOC.
         if nav_id.as_deref() == Some(item.idref.as_str()) {
@@ -76,10 +80,11 @@ pub fn read_epub_preview(path: String) -> Result<EpubPreview, String> {
         }
         chosen_index = idx;
         chosen_raw = content;
+        chosen_idref = item.idref.clone();
         break;
     }
 
-    build_preview(title, author, chosen_index, spine_total, chosen_raw)
+    build_preview(&mut doc, title, author, chosen_index, spine_total, chosen_raw, &chosen_idref)
 }
 
 /// Open a specific spine item by index. Used for prev/next navigation and
@@ -103,12 +108,13 @@ pub fn read_epub_chapter(path: String, spine_index: usize) -> Result<EpubPreview
         ));
     }
 
+    let idref = spine[spine_index].idref.clone();
     let raw = doc
-        .get_resource_str(&spine[spine_index].idref)
+        .get_resource_str(&idref)
         .map(|(c, _)| c)
         .unwrap_or_default();
 
-    build_preview(title, author, spine_index, spine_total, raw)
+    build_preview(&mut doc, title, author, spine_index, spine_total, raw, &idref)
 }
 
 #[derive(Serialize, Clone)]
@@ -242,11 +248,13 @@ fn walk_toc(
 }
 
 fn build_preview(
+    doc: &mut EpubDoc<BufReader<std::fs::File>>,
     title: String,
     author: String,
     spine_index: usize,
     spine_total: usize,
     raw: String,
+    chapter_idref: &str,
 ) -> Result<EpubPreview, String> {
     if raw.is_empty() {
         return Ok(EpubPreview {
@@ -260,7 +268,11 @@ fn build_preview(
         });
     }
     let body = extract_body_inner(&raw);
-    let cleaned = strip_visual(&body);
+    // Inline images BEFORE strip_visual so they survive the cleanup pass.
+    // Without this every <img> ref would either 404 (relative path can't
+    // resolve in webview) or be deleted by strip_visual.
+    let with_images = inline_images(doc, chapter_idref, &body);
+    let cleaned = strip_visual(&with_images);
     Ok(EpubPreview {
         title,
         author,
@@ -270,6 +282,129 @@ fn build_preview(
         spine_index,
         spine_total,
     })
+}
+
+static IMG_SRC_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches <img ... src="path" ...> and captures the src value.
+    // Permissive on attribute order, single/double quotes, and self-close.
+    Regex::new(r#"(?is)<img\b([^>]*?)\bsrc\s*=\s*["']([^"']+)["']([^>]*?)/?>"#).unwrap()
+});
+
+/// Walk every <img> in the chapter HTML, try to resolve its src against the
+/// chapter's location inside the EPUB, and rewrite the src to a data: URI
+/// with the image inlined as base64.
+///
+/// Images that can't be resolved (missing in the epub, or absolute http
+/// URLs) are left untouched — strip_visual will drop the un-rewritten ones
+/// afterwards to avoid broken-image placeholders.
+fn inline_images(
+    doc: &mut EpubDoc<BufReader<std::fs::File>>,
+    chapter_idref: &str,
+    html: &str,
+) -> String {
+    let Some(chapter_path) = doc
+        .resources
+        .get(chapter_idref)
+        .map(|r| r.path.clone())
+    else {
+        return html.to_string();
+    };
+    let chapter_dir = chapter_path.parent().map(Path::to_path_buf).unwrap_or_default();
+
+    // Pre-collect matches so we can mutate `doc` inside the replacement
+    // loop (replace_all's closure can't borrow doc mutably).
+    let mut replacements: Vec<(String, String)> = Vec::new();
+    for caps in IMG_SRC_RE.captures_iter(html) {
+        let whole = caps.get(0).unwrap().as_str().to_string();
+        let src = caps.get(2).unwrap().as_str();
+
+        // Skip absolute URLs and already-inlined data: URIs.
+        if src.starts_with("data:") || src.starts_with("http://") || src.starts_with("https://") {
+            continue;
+        }
+
+        let resolved = resolve_path_against(&chapter_dir, src);
+        let Some(bytes) = doc.get_resource_by_path(&resolved) else {
+            continue;
+        };
+        let mime = doc
+            .get_resource_mime_by_path(&resolved)
+            .unwrap_or_else(|| guess_mime_from_ext(&resolved));
+        let data_uri = format!("data:{};base64,{}", mime, B64.encode(&bytes));
+        let new_tag = whole.replacen(src, &data_uri, 1);
+        replacements.push((whole, new_tag));
+    }
+
+    let mut out = html.to_string();
+    for (old, new) in replacements {
+        // Single-occurrence replace per unique tag is fine; repeated
+        // identical img tags get the same replacement which is OK.
+        out = out.replacen(&old, &new, 1);
+    }
+    out
+}
+
+fn resolve_path_against(base_dir: &Path, src: &str) -> PathBuf {
+    // EPUB hrefs are URL-encoded (e.g. spaces become %20). Decode common
+    // entities before resolving against the zip filesystem.
+    let decoded = url_decode(src);
+    let joined = base_dir.join(decoded);
+    normalize(&joined)
+}
+
+fn url_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex_val(bytes[i + 1]), hex_val(bytes[i + 2])) {
+                out.push(h * 16 + l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
+}
+
+fn normalize(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in p.components() {
+        match comp {
+            Component::ParentDir => {
+                out.pop();
+            }
+            Component::CurDir => {}
+            Component::Normal(s) => out.push(s),
+            Component::RootDir | Component::Prefix(_) => out.push(comp.as_os_str()),
+        }
+    }
+    out
+}
+
+fn guess_mime_from_ext(p: &Path) -> String {
+    match p.extension().and_then(|s| s.to_str()).map(str::to_ascii_lowercase).as_deref() {
+        Some("jpg") | Some("jpeg") => "image/jpeg",
+        Some("png") => "image/png",
+        Some("gif") => "image/gif",
+        Some("webp") => "image/webp",
+        Some("svg") => "image/svg+xml",
+        Some("bmp") => "image/bmp",
+        _ => "application/octet-stream",
+    }
+    .to_string()
 }
 
 static SVG_RE: LazyLock<Regex> =
@@ -293,12 +428,34 @@ fn looks_like_toc(html: &str) -> bool {
     ANCHOR_RE.find_iter(html).count() > 10
 }
 
-/// Strip visual/asset tags that won't load (relative paths can't resolve in
-/// the webview) and would otherwise produce broken-image placeholders or noise.
+/// Strip visual/asset tags that won't load (relative paths can't resolve
+/// in the webview) and would otherwise produce broken-image placeholders
+/// or noise. Images that have already been inlined as `data:` URIs are
+/// kept; only un-rewritten <img>/<image> with relative or unknown src
+/// are dropped.
 fn strip_visual(html: &str) -> String {
     let s = SVG_RE.replace_all(html, "");
-    let s = IMG_RE.replace_all(&s, "");
-    let s = IMAGE_RE.replace_all(&s, "");
+    let s = IMG_RE.replace_all(&s, |caps: &regex::Captures| {
+        let tag = caps.get(0).map(|m| m.as_str()).unwrap_or("");
+        // Keep <img> only if it points at an inlined data URI we created.
+        if tag.contains("src=\"data:") || tag.contains("src='data:") {
+            tag.to_string()
+        } else {
+            String::new()
+        }
+    });
+    let s = IMAGE_RE.replace_all(&s, |caps: &regex::Captures| {
+        let tag = caps.get(0).map(|m| m.as_str()).unwrap_or("");
+        if tag.contains("href=\"data:")
+            || tag.contains("href='data:")
+            || tag.contains("xlink:href=\"data:")
+            || tag.contains("xlink:href='data:")
+        {
+            tag.to_string()
+        } else {
+            String::new()
+        }
+    });
     let s = LINK_RE.replace_all(&s, "");
     let s = SCRIPT_RE.replace_all(&s, "");
     let s = STYLE_RE.replace_all(&s, "");

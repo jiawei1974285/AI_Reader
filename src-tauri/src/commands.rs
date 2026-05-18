@@ -74,6 +74,23 @@ pub fn list_books(state: State<AppState>) -> Result<Vec<db::Book>, String> {
     db::list_books(&conn).map_err(|e| e.to_string())
 }
 
+/// Remove a book from the library WITHOUT deleting the underlying file.
+/// CASCADE drops dependent rows: reading_progress, highlights, book_chunks,
+/// book_index_status, chat_messages. The on-disk file at `books.file_path`
+/// is left alone — users can re-add it by scanning, or the file watcher
+/// will pick it back up on its own.
+///
+/// Note: a re-scan WILL re-add this book unless the user moves it out of
+/// the library root first. There's no "ignore list" yet; we may add one
+/// if this becomes a frequent gripe.
+#[tauri::command]
+pub fn remove_book(book_id: i64, state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM books WHERE id = ?1", rusqlite::params![book_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn get_book_by_path(
     path: String,
