@@ -57,7 +57,20 @@ pub fn decompress(data: &[u8]) -> Vec<u8> {
             }
             // Data is LZ77-compressed
             0x80..=0xbf => {
-                if pos >= text.len() {
+                // [AIreader patch] Upstream had `if pos >= text.len()` here
+                // — comparing INPUT position against OUTPUT length, which
+                // is meaningless and triggers a spurious early return on
+                // almost every PalmDOC record. The result was that CJK
+                // MOBIs (which lean heavily on LZ77 dictionary references)
+                // would silently truncate ~90% of their content after the
+                // first back-reference in each record.
+                //
+                // The correct check is "is there a next byte to pair with?"
+                // — `length` is the INPUT (`data`) length declared at the
+                // top of this fn. We've already incremented `pos` past the
+                // current byte; if pos == length there's no trailing byte
+                // to form the LZ77 (distance, length) pair, so we bail.
+                if pos >= length {
                     return text;
                 }
 
