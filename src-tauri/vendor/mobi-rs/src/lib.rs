@@ -388,10 +388,15 @@ impl Mobi {
                 all
             }
             Compression::PalmDoc => {
+                // Stream into a single output buffer so PalmDOC's LZ77
+                // window crosses record boundaries (matches the spec —
+                // per-record buffers were the root cause of mid-paragraph
+                // garbage bursts in long CJK MOBIs, where LZ77 references
+                // at the start of each record point back into the previous
+                // record's tail).
                 let mut all = Vec::new();
                 for r in self.raw_records().range(self.readable_records_range()).iter() {
-                    let dec = r.decompress_palmdoc();
-                    all.extend_from_slice(&dec.0);
+                    r.decompress_palmdoc_into(&mut all);
                 }
                 all
             }

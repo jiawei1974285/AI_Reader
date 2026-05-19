@@ -39,6 +39,14 @@ impl<'a> RawRecord<'a> {
         DecompressedRecord(palmdoc::decompress(self.content))
     }
 
+    /// [AIreader patch] Stream-aware variant: appends this record's
+    /// decompressed bytes to a shared buffer so LZ77 back-references
+    /// can resolve into earlier records' content. See
+    /// `compression::palmdoc::decompress_into` for rationale.
+    pub(crate) fn decompress_palmdoc_into(&self, out: &mut Vec<u8>) {
+        palmdoc::decompress_into(self.content, out);
+    }
+
     pub(crate) fn is_image_record(&self) -> bool {
         if self.content.len() < 4 {
             return false;

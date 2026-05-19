@@ -1,8 +1,25 @@
+/// Backward-compatible per-record wrapper. Use [`decompress_into`] when
+/// decompressing a multi-record stream so LZ77 references can cross
+/// record boundaries.
 pub fn decompress(data: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    decompress_into(data, &mut out);
+    out
+}
+
+/// [AIreader patch] Stream-aware PalmDOC decompressor: appends this
+/// record's decompressed bytes to `text` rather than starting a fresh
+/// buffer each call. PalmDOC's LZ77 window (~2 KB) is defined to cross
+/// record boundaries; the per-record `decompress(data)` above would
+/// fail to resolve any LZ77 reference whose offset reaches into the
+/// previous record, producing garbage-text bursts that follow the
+/// pattern of a record's first ~2 KB. With a shared `text` buffer the
+/// `text_pos - offset` lookup naturally finds the right bytes.
+pub fn decompress_into(data: &[u8], text: &mut Vec<u8>) {
     let length = data.len();
     let mut pos: usize = 0;
-    let mut text_pos: usize = 0;
-    let mut text: Vec<u8> = vec![];
+    // Continue from wherever the shared buffer currently ends.
+    let mut text_pos: usize = text.len();
 
     let mut prev = None;
     while pos < length {
@@ -20,9 +37,14 @@ pub fn decompress(data: &[u8]) -> Vec<u8> {
                 let offset = (dist_len_bytes >> 3) as usize; // Remaining 11 bits are offset
                 let len = ((dist_len_bytes & 0x0007) + 3) as usize; // Length is  rightmost three bits + 3
 
-                // Calculate the position backwards in the decompressed text
+                // With a stream-wide buffer, `offset > text_pos` only
+                // happens for genuinely malformed input. Old code used
+                // `offset % text_pos` as a random fallback (the actual
+                // cause of mid-paragraph garbage bursts); clamping to 0
+                // is at worst a few duplicated bytes from the start of
+                // the book, never random noise.
                 let start = if offset > text_pos {
-                    offset % text_pos
+                    0
                 } else {
                     text_pos - offset
                 };
@@ -71,7 +93,7 @@ pub fn decompress(data: &[u8]) -> Vec<u8> {
                 // current byte; if pos == length there's no trailing byte
                 // to form the LZ77 (distance, length) pair, so we bail.
                 if pos >= length {
-                    return text;
+                    return;
                 }
 
                 // Save current byte to combine with the next one to get a distance-length pair
@@ -85,6 +107,4 @@ pub fn decompress(data: &[u8]) -> Vec<u8> {
             }
         }
     }
-
-    text
 }
