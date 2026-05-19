@@ -1,11 +1,15 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
+use chardetng::EncodingDetector;
+use mobi::headers::TextEncoding;
 use mobi::Mobi;
 use regex::Regex;
 use std::collections::HashMap;
+use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::path::Path;
-use std::sync::LazyLock;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::SystemTime;
 
 use crate::readers::epub::{EpubPreview, TocEntry};
 
@@ -46,9 +50,81 @@ fn guard<T, F: FnOnce() -> Result<T, String>>(label: &str, f: F) -> Result<T, St
 
 const FALLBACK_CHUNK_CHARS: usize = 4000;
 
+#[derive(Clone)]
 struct MobiChapter {
     label: String,
     html: String,
+}
+
+/// Single-slot cache for the most recently opened MOBI. Reading a book is a
+/// sequential per-chapter operation, so a single slot covers ~100% of intra-
+/// session traffic. Replaced on book switch (different path) or staleness
+/// (mtime moved — e.g., library watcher saw a rewrite).
+///
+/// Avoids re-running `content_as_string_lossy` + `collect_image_data_uris`
+/// (which base64-encodes every embedded image) on every chapter flip — those
+/// dominate cold-call latency on image-heavy MOBI.
+struct MobiCache {
+    path: PathBuf,
+    mtime: Option<SystemTime>,
+    title: String,
+    author: String,
+    body_len: usize,
+    chapters: Vec<MobiChapter>,
+}
+
+static MOBI_CACHE: LazyLock<Mutex<Option<MobiCache>>> = LazyLock::new(|| Mutex::new(None));
+
+/// One per-call view of the parsed MOBI; cheap to clone (Vec of String).
+struct ParsedView {
+    title: String,
+    author: String,
+    body_len: usize,
+    chapters: Vec<MobiChapter>,
+}
+
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).ok().and_then(|m| m.modified().ok())
+}
+
+/// Returns a parsed view of the MOBI body — from cache when the same file
+/// hasn't been touched, otherwise parses fresh and refills the cache.
+fn cached_or_parse(path: &Path) -> Result<ParsedView, String> {
+    let mtime = file_mtime(path);
+    {
+        let guard = MOBI_CACHE.lock().unwrap();
+        if let Some(c) = guard.as_ref() {
+            if c.path == path && c.mtime == mtime {
+                return Ok(ParsedView {
+                    title: c.title.clone(),
+                    author: c.author.clone(),
+                    body_len: c.body_len,
+                    chapters: c.chapters.clone(),
+                });
+            }
+        }
+    }
+
+    let (title, author, body) = read_body(path)?;
+    let body_len = body.len();
+    let chapters = split_chapters(&body);
+
+    let entry = MobiCache {
+        path: path.to_path_buf(),
+        mtime,
+        title: title.clone(),
+        author: author.clone(),
+        body_len,
+        chapters: chapters.clone(),
+    };
+    *MOBI_CACHE.lock().unwrap() = Some(entry);
+
+    Ok(ParsedView {
+        title,
+        author,
+        body_len,
+        chapters,
+    })
 }
 
 fn open(path: &Path) -> Result<Mobi, String> {
@@ -165,15 +241,18 @@ fn title_from_path(path: &Path) -> String {
 }
 
 /// Read raw MOBI body once; called by both initial / chapter / toc paths.
-/// MOBI is small enough (median ~1-5 MB) that re-parsing per call is fine
-/// and saves us a cache layer.
+/// Per-file caching is done one layer up in `cached_or_parse`.
 ///
 /// Returns (title, author, body_html). `body_html` already has images
 /// inlined as `data:` URIs so the webview can render them without needing
 /// to extract anything to disk.
 fn read_body(path: &Path) -> Result<(String, String, String), String> {
     let m = open(path)?;
-    let body = m.content_as_string_lossy();
+    // Don't trust mobi-rs's header-declared encoding — Chinese MOBIs often
+    // declare UTF-8 but contain GBK/GB18030 bytes (older Calibre conversions,
+    // third-party Kindle tools, etc.). Run chardetng on raw bytes instead.
+    let bytes = m.content_as_bytes();
+    let body = decode_content_bytes(&bytes, m.text_encoding());
     let title = {
         let t = m.title();
         if t.trim().is_empty() {
@@ -191,6 +270,82 @@ fn read_body(path: &Path) -> Result<(String, String, String), String> {
     let body = inline_mobi_images(&body, &images);
 
     Ok((title, author, body))
+}
+
+/// Decode raw MOBI content bytes to a String. Strategy:
+///   1. Try strict UTF-8 — clean books win immediately, zero overhead.
+///   2. Else decode UTF-8 lossy and measure the U+FFFD rate. This is
+///      the "MOBI is *almost* UTF-8 with a few corrupt bytes" case —
+///      preserves 95%+ correct Chinese with sprinkled `�`, which is
+///      MUCH better than wholesale switching encodings.
+///   3. Only when UTF-8 lossy is genuinely bad (>5% `�`) do we trust
+///      chardetng to pick a different encoding. With a `cn` TLD hint
+///      so it prefers CJK encodings over Latin-1 when evidence is
+///      ambiguous (without the hint chardetng picks Windows-1252 for
+///      Chinese MOBIs, producing `è½å~ç»æžå`-style garbage).
+///
+/// `header_hint` is only logged for diagnostics — we don't trust it.
+fn decode_content_bytes(bytes: &[u8], header_hint: TextEncoding) -> String {
+    if let Ok(s) = std::str::from_utf8(bytes) {
+        return s.to_string();
+    }
+
+    let utf8_lossy: String = String::from_utf8_lossy(bytes).into_owned();
+    let utf8_fffd_rate = fffd_rate(&utf8_lossy);
+
+    // Threshold tuned for the observed split:
+    //   - Real "mostly UTF-8" books: <1% FFFD
+    //   - Wholesale encoding mismatch: 30-50% FFFD
+    // 5% is well above the former and well below the latter.
+    if utf8_fffd_rate < 0.05 {
+        eprintln!(
+            "[mobi/aireader] decode_content_bytes: {} bytes, header={:?}, \
+             utf8_lossy clean enough (fffd_rate={:.4}) → kept as UTF-8",
+            bytes.len(),
+            header_hint,
+            utf8_fffd_rate
+        );
+        return utf8_lossy;
+    }
+
+    let mut detector = EncodingDetector::new();
+    detector.feed(bytes, true);
+    // `cn` TLD biases toward GBK/GB18030 over Latin-1 when statistics are
+    // borderline — essential for CJK MOBIs whose body bytes contain enough
+    // high-bit distribution to look "Western" to a naive detector.
+    let guessed = detector.guess(Some(b"cn"), true);
+    let (guess_text, _, had_errors) = guessed.decode(bytes);
+    let guess_fffd_rate = fffd_rate(&guess_text);
+
+    // Final safety net: if chardetng's pick is WORSE than UTF-8 lossy
+    // (rare, but possible on truly garbled files), keep UTF-8 lossy.
+    let pick_guess = guess_fffd_rate + 0.02 < utf8_fffd_rate;
+    eprintln!(
+        "[mobi/aireader] decode_content_bytes: {} bytes, header={:?}, \
+         utf8_fffd={:.4}, chardetng={} (fffd={:.4}, errors={}), picked={}",
+        bytes.len(),
+        header_hint,
+        utf8_fffd_rate,
+        guessed.name(),
+        guess_fffd_rate,
+        had_errors,
+        if pick_guess { guessed.name() } else { "utf-8 (lossy)" }
+    );
+
+    if pick_guess {
+        guess_text.into_owned()
+    } else {
+        utf8_lossy
+    }
+}
+
+fn fffd_rate(s: &str) -> f64 {
+    let total = s.chars().count();
+    if total == 0 {
+        return 0.0;
+    }
+    let bad = s.chars().filter(|c| *c == '\u{FFFD}').count();
+    bad as f64 / total as f64
 }
 
 /// Map of `recindex` (1-based, as it appears in MOBI HTML) to a fully
@@ -232,45 +387,104 @@ fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-// Three patterns we see in real MOBI files for embedded image refs:
-//   <img recindex="0001"/>                  ← classic MOBI / KF7
-//   <img src="kindle:embed:0001?mime=image/jpeg"/>   ← some KF8
-//   <img src="kindle:embed:0001"/>          ← shorter variant
-static IMG_RECINDEX_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<img\b([^>]*?)\brecindex\s*=\s*["']?(\d+)["']?([^>]*?)/?>"#).unwrap()
-});
-static IMG_KINDLE_EMBED_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)<img\b([^>]*?)\bsrc\s*=\s*["']kindle:embed:0*(\d+)[^"']*["']([^>]*?)/?>"#)
-        .unwrap()
+// Catches every `<img …/>` in the body so we can decide per-tag how to
+// resolve it. Real-world MOBI markup we've seen:
+//   <img recindex="0001"/>                          ← classic MOBI / KF7
+//   <img src="kindle:embed:0001?mime=image/jpeg"/>  ← KF8
+//   <img src="kindle:embed:0001"/>                  ← shorter KF8 variant
+//   <img src="img00001.jpg"/>                       ← some Calibre presets
+//   <img src="..."/> (anything else)                ← unknown converter quirks
+static IMG_TAG_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)<img\b([^>]*?)/?>"#).unwrap());
+static ATTR_RECINDEX_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)\brecindex\s*=\s*["']?0*(\d+)["']?"#).unwrap());
+static ATTR_KINDLE_EMBED_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?is)\bsrc\s*=\s*["']kindle:embed:0*(\d+)[^"']*["']"#).unwrap()
 });
 
 fn inline_mobi_images(body: &str, images: &HashMap<usize, String>) -> String {
-    if images.is_empty() {
-        return body.to_string();
+    // Track stats so we can diagnose mis-rendering MOBIs from the dev console
+    // — without these we can't tell "this book has no images" apart from
+    // "we have the records but failed to match the tag syntax".
+    let mut total = 0usize;
+    let mut by_recindex = 0usize;
+    let mut by_kindle = 0usize;
+    let mut by_sequential = 0usize;
+    let mut dropped = 0usize;
+    // Sequential fallback uses ordinals (1-based). `collect_image_data_uris`
+    // inserts every image under its ordinal key 1..=N, plus its record_index
+    // and record_index-first_image+1 — that triple-keying makes recindex
+    // lookup tolerant of all three numbering schemes seen in real MOBIs.
+    let mut seq_counter = 1usize;
+    let mut first_unmatched: Option<String> = None;
+
+    let out = IMG_TAG_RE.replace_all(body, |caps: &regex::Captures| -> String {
+        total += 1;
+        let attrs = caps.get(1).map(|m| m.as_str()).unwrap_or("");
+
+        // 1. recindex="N" — canonical MOBI / KF7 reference. HashMap will
+        //    match against ordinal OR raw record_index OR offset-from-first,
+        //    so we don't have to guess which numbering this MOBI uses.
+        if let Some(m) = ATTR_RECINDEX_RE.captures(attrs) {
+            if let Ok(n) = m.get(1).unwrap().as_str().parse::<usize>() {
+                if let Some(uri) = images.get(&n) {
+                    by_recindex += 1;
+                    return format!(r#"<img src="{}" />"#, uri);
+                }
+            }
+        }
+        // 2. src="kindle:embed:N" — KF8 reference
+        if let Some(m) = ATTR_KINDLE_EMBED_RE.captures(attrs) {
+            if let Ok(n) = m.get(1).unwrap().as_str().parse::<usize>() {
+                if let Some(uri) = images.get(&n) {
+                    by_kindle += 1;
+                    return format!(r#"<img src="{}" />"#, uri);
+                }
+            }
+        }
+        // 3. Sequential fallback for unknown tag syntax (e.g. Calibre's
+        //    img00001.jpg form). Image records appear in document order in
+        //    every MOBI we've inspected, so by-ordinal assignment recovers
+        //    images even when the tag carries no resolvable reference.
+        if let Some(uri) = images.get(&seq_counter) {
+            if first_unmatched.is_none() {
+                first_unmatched = Some(attrs.chars().take(120).collect());
+            }
+            seq_counter += 1;
+            by_sequential += 1;
+            return format!(r#"<img src="{}" />"#, uri);
+        }
+        // 4. Ran out of records — drop the tag (CSS would hide it anyway).
+        if first_unmatched.is_none() {
+            first_unmatched = Some(attrs.chars().take(120).collect());
+        }
+        dropped += 1;
+        String::new()
+    });
+
+    if total > 0 || !images.is_empty() {
+        eprintln!(
+            "[mobi/aireader] inline_mobi_images: {tags} <img> tags, {keys} image-record keys \
+             (~{imgs} images) | matched: recindex={ri} kindle={ki} sequential={seq} dropped={dr} \
+             | first_unmatched_attrs={unmatched:?}",
+            tags = total,
+            keys = images.len(),
+            // `collect_image_data_uris` inserts ~2-3 keys per image.
+            imgs = images.len() / 3,
+            ri = by_recindex,
+            ki = by_kindle,
+            seq = by_sequential,
+            dr = dropped,
+            unmatched = first_unmatched,
+        );
     }
-    let pass1 = IMG_RECINDEX_RE.replace_all(body, |caps: &regex::Captures| -> String {
-        replace_with_data_uri(caps, images)
-    });
-    let pass2 = IMG_KINDLE_EMBED_RE.replace_all(&pass1, |caps: &regex::Captures| -> String {
-        replace_with_data_uri(caps, images)
-    });
-    pass2.into_owned()
+
+    out.into_owned()
 }
 
-fn replace_with_data_uri(caps: &regex::Captures, images: &HashMap<usize, String>) -> String {
-    let before = caps.get(1).map(|m| m.as_str()).unwrap_or("");
-    let n_str = caps.get(2).map(|m| m.as_str()).unwrap_or("");
-    let after = caps.get(3).map(|m| m.as_str()).unwrap_or("");
-    let Ok(n) = n_str.parse::<usize>() else {
-        return caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string();
-    };
-    let Some(data_uri) = images.get(&n) else {
-        // No matching image record — drop the tag so we don't show a
-        // broken-image icon.
-        return String::new();
-    };
-    format!(r#"<img{} src="{}"{} />"#, before, data_uri, after)
-}
+// (Both versions' resolve helpers were inlined into `inline_mobi_images`
+// above — recindex/kindle/sequential branches now do their own HashMap
+// lookup and format the replacement directly.)
 
 #[tauri::command]
 pub fn read_mobi_initial(path: String) -> Result<EpubPreview, String> {
@@ -281,18 +495,17 @@ pub fn read_mobi_initial(path: String) -> Result<EpubPreview, String> {
 pub fn read_mobi_chapter(path: String, spine_index: usize) -> Result<EpubPreview, String> {
     guard("MOBI 章节", || {
         let p = Path::new(&path);
-        let (title, author, body) = read_body(p)?;
-        let chapters = split_chapters(&body);
-        let total = chapters.len();
+        let view = cached_or_parse(p)?;
+        let total = view.chapters.len();
         if spine_index >= total {
             return Err(format!("spine_index {spine_index} out of range (0..{total})"));
         }
-        let ch = &chapters[spine_index];
+        let ch = &view.chapters[spine_index];
 
         Ok(EpubPreview {
-            title,
-            author,
-            raw_length: body.len(),
+            title: view.title,
+            author: view.author,
+            raw_length: view.body_len,
             extracted_length: ch.html.len(),
             html: ch.html.clone(),
             spine_index,
@@ -305,9 +518,9 @@ pub fn read_mobi_chapter(path: String, spine_index: usize) -> Result<EpubPreview
 pub fn get_mobi_toc(path: String) -> Result<Vec<TocEntry>, String> {
     guard("MOBI 目录", || {
         let p = Path::new(&path);
-        let (_t, _a, body) = read_body(p)?;
-        let chapters = split_chapters(&body);
-        Ok(chapters
+        let view = cached_or_parse(p)?;
+        Ok(view
+            .chapters
             .iter()
             .enumerate()
             .map(|(i, ch)| TocEntry {

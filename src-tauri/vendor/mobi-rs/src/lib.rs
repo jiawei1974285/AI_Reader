@@ -364,6 +364,49 @@ impl Mobi {
             Compression::Huff => self.huff_string(),
         }
     }
+
+    /// [AIreader extension] Returns the concatenated decompressed content
+    /// bytes WITHOUT any string-level decoding. This lets callers run their
+    /// own encoding detection (e.g. chardetng) instead of trusting the MOBI
+    /// header's declared encoding — which lies for many Chinese MOBIs
+    /// produced by older Calibre versions or third-party converters
+    /// (headers claim UTF-8, content is actually GBK/GB18030/Big5).
+    ///
+    /// The bytes are pre-concatenated across records so multi-byte chars
+    /// that straddle record boundaries stay intact (same cross-record fix
+    /// the patched `*_string_lossy` methods apply).
+    ///
+    /// Returns an empty Vec if Huff decompression fails (Huff data is rare;
+    /// strict callers should call `content_as_string()` for that case).
+    pub fn content_as_bytes(&self) -> Vec<u8> {
+        match self.compression() {
+            Compression::No => {
+                let mut all = Vec::new();
+                for r in self.raw_records().range(self.readable_records_range()).iter() {
+                    all.extend_from_slice(r.content);
+                }
+                all
+            }
+            Compression::PalmDoc => {
+                let mut all = Vec::new();
+                for r in self.raw_records().range(self.readable_records_range()).iter() {
+                    let dec = r.decompress_palmdoc();
+                    all.extend_from_slice(&dec.0);
+                }
+                all
+            }
+            Compression::Huff => match self.huff_data() {
+                Ok(data) => {
+                    let mut all = Vec::new();
+                    for section in data {
+                        all.extend_from_slice(&section);
+                    }
+                    all
+                }
+                Err(_) => Vec::new(),
+            },
+        }
+    }
 }
 
 #[cfg(test)]

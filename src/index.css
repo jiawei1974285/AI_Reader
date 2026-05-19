@@ -303,11 +303,14 @@ body {
   }
 }
 
-/* Phase 0 belt-and-suspenders: EPUB resources (images, fonts) reference
- * relative paths that can't resolve in the webview, so hide visual elements
- * that would render as broken-image placeholders. Phase 1+ will serve EPUB
- * resources via a custom protocol handler. */
-article img,
+/* EPUB / MOBI readers now inline images as base64 data: URIs (Phase 1 has
+ * landed in epub.rs::inline_images and mobi.rs::inline_mobi_images). Only
+ * hide <img> tags whose src couldn't be resolved — those would render as
+ * broken-image icons. Inlined data: URIs render normally.
+ * SVG / <picture> / <video> stay hidden — no reader inlines those yet. */
+article img:not([src^="data:"]) {
+  display: none !important;
+}
 article svg,
 article image,
 article picture,
@@ -384,6 +387,74 @@ article video {
 }
 .reading blockquote p {
   text-indent: 0;
+}
+
+/* Cap nested-blockquote margin cascade. Calibre MOBI exports routinely wrap
+ * content in 4-5 nested <blockquote> levels; without this, each level adds
+ * 2em on each side and squeezes lines to single-char width (the "vertical
+ * Chinese characters" symptom). */
+.reading blockquote blockquote {
+  margin: 0.4em 0.8em;
+  padding-left: 0.6em;
+}
+.reading blockquote blockquote blockquote {
+  margin: 0.2em 0;
+  padding-left: 0.4em;
+  border-left: none;
+}
+.reading blockquote blockquote blockquote blockquote {
+  margin: 0;
+  padding-left: 0;
+}
+
+/* MOBI/Calibre frequently use <table> for layout, not for tabular data.
+ * Force block flow so fixed col widths don't crush text into single-char
+ * columns; allow horizontal scroll for genuinely wide tables. */
+.reading table {
+  display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  margin: 1em 0;
+}
+.reading td,
+.reading th {
+  min-width: 4em;
+  padding: 0.25em 0.5em;
+  vertical-align: top;
+}
+
+/* pre/code blocks: wrap long code lines, scroll if needed. Without this,
+ * long ASCII code lines force the entire column to break-word per char. */
+.reading pre {
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 100%;
+  overflow-x: auto;
+  margin: 1em 0;
+  padding: 0.6em 0.8em;
+  background: color-mix(in srgb, var(--color-paper-edge) 22%, transparent);
+  border-radius: 4px;
+  font-size: 0.92em;
+}
+.reading code {
+  font-family: ui-monospace, "SFMono-Regular", "Menlo", "Consolas", monospace;
+  font-size: 0.92em;
+}
+
+/* Calibre often emits <div style="margin-left: 5em"> wrappers to mimic
+ * source indentation; these stack the same way blockquotes do. Neutralize. */
+.reading div[style*="margin-left"] {
+  margin-left: 0 !important;
+}
+
+/* Inline images (data: URIs from EPUB/MOBI). Constrain to column width so
+ * a high-res page scan doesn't blow out the layout. */
+.reading img {
+  max-width: 100%;
+  height: auto;
+  display: block;
+  margin: 1.2em auto;
 }
 
 /* Lists in body (rare in novels but possible) */
