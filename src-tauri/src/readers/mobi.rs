@@ -273,16 +273,20 @@ fn read_body(path: &Path) -> Result<(String, String, String), String> {
 }
 
 /// Decode raw MOBI content bytes to a String. Strategy:
-///   1. Try strict UTF-8 — clean books win immediately, zero overhead.
-///   2. Else decode UTF-8 lossy and measure the U+FFFD rate. This is
-///      the "MOBI is *almost* UTF-8 with a few corrupt bytes" case —
-///      preserves 95%+ correct Chinese with sprinkled `�`, which is
-///      MUCH better than wholesale switching encodings.
-///   3. Only when UTF-8 lossy is genuinely bad (>5% `�`) do we trust
-///      chardetng to pick a different encoding. With a `cn` TLD hint
-///      so it prefers CJK encodings over Latin-1 when evidence is
-///      ambiguous (without the hint chardetng picks Windows-1252 for
-///      Chinese MOBIs, producing `è½å~ç»æžå`-style garbage).
+///   1. Strict UTF-8 — clean books win immediately, zero overhead.
+///   2. Run chardetng FIRST (not as a fallback). If it picks any
+///      non-UTF-8 encoding, that's a strong signal the MOBI's
+///      header_hint is lying about UTF-8 and we trust chardetng's
+///      pick. Reason: GBK content commonly has lead bytes in the
+///      0xE0-0xEF range (CJK first-byte zone) which `String::from_
+///      utf8_lossy` treats as valid 3-byte UTF-8 lead, producing
+///      VALID-LOOKING-but-wrong CJK characters (rare/extension
+///      ideographs) instead of `�` — the old fffd-rate gate let
+///      these books slip through entirely garbled. chardetng with
+///      `cn` TLD hint is the only signal that catches them.
+///   3. If chardetng agrees on UTF-8, fall back to UTF-8 lossy.
+///      That handles the "mostly UTF-8 + a few corrupt bytes"
+///      case (preserves 95%+ correct CJK + sprinkled `�`).
 ///
 /// `header_hint` is only logged for diagnostics — we don't trust it.
 fn decode_content_bytes(bytes: &[u8], header_hint: TextEncoding) -> String {
@@ -290,53 +294,45 @@ fn decode_content_bytes(bytes: &[u8], header_hint: TextEncoding) -> String {
         return s.to_string();
     }
 
-    let utf8_lossy: String = String::from_utf8_lossy(bytes).into_owned();
-    let utf8_fffd_rate = fffd_rate(&utf8_lossy);
-
-    // Threshold tuned for the observed split:
-    //   - Real "mostly UTF-8" books: <1% FFFD
-    //   - Wholesale encoding mismatch: 30-50% FFFD
-    // 5% is well above the former and well below the latter.
-    if utf8_fffd_rate < 0.05 {
-        eprintln!(
-            "[mobi/aireader] decode_content_bytes: {} bytes, header={:?}, \
-             utf8_lossy clean enough (fffd_rate={:.4}) → kept as UTF-8",
-            bytes.len(),
-            header_hint,
-            utf8_fffd_rate
-        );
-        return utf8_lossy;
-    }
-
     let mut detector = EncodingDetector::new();
     detector.feed(bytes, true);
-    // `cn` TLD biases toward GBK/GB18030 over Latin-1 when statistics are
-    // borderline — essential for CJK MOBIs whose body bytes contain enough
-    // high-bit distribution to look "Western" to a naive detector.
+    // `cn` TLD biases toward GBK/GB18030 over Latin-1 when statistics
+    // are borderline — essential for CJK MOBIs whose body bytes contain
+    // enough high-bit distribution to look "Western" to a naive detector.
     let guessed = detector.guess(Some(b"cn"), true);
-    let (guess_text, _, had_errors) = guessed.decode(bytes);
-    let guess_fffd_rate = fffd_rate(&guess_text);
 
-    // Final safety net: if chardetng's pick is WORSE than UTF-8 lossy
-    // (rare, but possible on truly garbled files), keep UTF-8 lossy.
-    let pick_guess = guess_fffd_rate + 0.02 < utf8_fffd_rate;
+    // Non-UTF-8 guess → the MOBI header is lying. Trust chardetng even
+    // if UTF-8 lossy looks clean: GBK lead bytes 0xE0-0xEF map to valid
+    // 3-byte UTF-8 leads and silently produce wrong-but-valid CJK chars.
+    if guessed != encoding_rs::UTF_8 {
+        let (text, _, had_errors) = guessed.decode(bytes);
+        let resulting_fffd_rate = fffd_rate(&text);
+        eprintln!(
+            "[mobi/aireader] decode_content_bytes: {} bytes, header_hint={:?}, \
+             chardetng picked {} (fffd={:.4}, errors={}) → used",
+            bytes.len(),
+            header_hint,
+            guessed.name(),
+            resulting_fffd_rate,
+            had_errors
+        );
+        return text.into_owned();
+    }
+
+    // chardetng agrees this is UTF-8. The strict pass already failed,
+    // so we have at least one bad byte — return lossy and accept the
+    // sprinkled `�` (typical for an *almost*-UTF-8 MOBI with a few
+    // corruption sites).
+    let utf8_lossy: String = String::from_utf8_lossy(bytes).into_owned();
+    let utf8_fffd_rate = fffd_rate(&utf8_lossy);
     eprintln!(
         "[mobi/aireader] decode_content_bytes: {} bytes, header={:?}, \
-         utf8_fffd={:.4}, chardetng={} (fffd={:.4}, errors={}), picked={}",
+         chardetng=UTF-8 (utf8_lossy fffd_rate={:.4}) → utf-8 lossy",
         bytes.len(),
         header_hint,
-        utf8_fffd_rate,
-        guessed.name(),
-        guess_fffd_rate,
-        had_errors,
-        if pick_guess { guessed.name() } else { "utf-8 (lossy)" }
+        utf8_fffd_rate
     );
-
-    if pick_guess {
-        guess_text.into_owned()
-    } else {
-        utf8_lossy
-    }
+    utf8_lossy
 }
 
 fn fffd_rate(s: &str) -> f64 {
