@@ -47,6 +47,7 @@ type Props = {
   onOpenNotes: () => void;
   onOpenMusic: () => void;
   onOpenStats: () => void;
+  onOpenAiSettings: () => void;
 };
 
 export function LibraryView({
@@ -54,6 +55,7 @@ export function LibraryView({
   onOpenNotes,
   onOpenMusic,
   onOpenStats,
+  onOpenAiSettings,
 }: Props) {
   const [root, setRoot] = useState<string | null>(null);
   const [books, setBooks] = useState<Book[]>([]);
@@ -414,6 +416,9 @@ export function LibraryView({
           </button>
           <button onClick={onOpenStats} className="studio-button">
             统计
+          </button>
+          <button onClick={onOpenAiSettings} className="studio-button">
+            AI 设置
           </button>
           <button onClick={rescan} disabled={scanning} className="studio-button">
             {scanning ? "扫描中" : "重新扫描"}

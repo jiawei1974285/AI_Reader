@@ -39,6 +39,7 @@ mobi = "0.8"
 notify = "8"
 notify-debouncer-full = "0.7"
 base64 = "0.22"
+pdf-extract = "0.10.0"
 
 # Use a locally-patched fork of `mobi` 0.8 (see vendor/mobi-rs).
 # The upstream crate panics on real-world MOBI files when record offsets

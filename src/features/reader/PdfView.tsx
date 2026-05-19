@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -11,6 +11,7 @@ import {
   loadReaderSettings,
   saveReaderSettings,
   type Highlight,
+  type AiSettings,
   type ReaderSettings,
   type TocEntry,
 } from "@/lib/ipc";
@@ -21,6 +22,7 @@ import { LookupBubble } from "./LookupBubble";
 import { MusicSuggestPanel } from "./MusicSuggestPanel";
 import { useReadTimeHeartbeat } from "./useReadTimeHeartbeat";
 import { ReaderSettingsPanel } from "./ReaderSettings";
+import { ChatPanel } from "./ChatPanel";
 import { captureSelection } from "./highlight";
 import { BookSearch } from "./BookSearch";
 
@@ -34,6 +36,8 @@ pdfjs.GlobalWorkerOptions.workerSrc = new URL(
 type Props = {
   path: string;
   bookId: number;
+  aiSettings: AiSettings;
+  onOpenAiSettings: () => void;
   onBack: () => void;
   backLabel?: string;
   initialSpine?: number;
@@ -69,6 +73,8 @@ type HighlightRect = {
 export function PdfView({
   path,
   bookId,
+  aiSettings,
+  onOpenAiSettings,
   onBack,
   backLabel = "返回书架",
   initialSpine,
@@ -84,9 +90,13 @@ export function PdfView({
   const [displayMode, setDisplayMode] = useState<"fit-width" | "fit-page" | "custom">(
     "fit-width",
   );
+  const [textMode, setTextMode] = useState(false);
+  const [pageText, setPageText] = useState("");
+  const [pageTextLoading, setPageTextLoading] = useState(false);
   const [customScale, setCustomScale] = useState(1.0);
   const [fullscreen, setFullscreen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
 
   // Ctrl/Cmd+F opens the in-book search bar (current page only — pdf.js
   // doesn't expose a way to text-search across un-rendered pages without
@@ -176,7 +186,13 @@ export function PdfView({
     };
   }, [bookId]);
 
-  const fileSrc = useMemo(() => convertFileSrc(path), [path]);
+  const fileSrc = useMemo(() => {
+    try {
+      return convertFileSrc(path);
+    } catch {
+      return path;
+    }
+  }, [path]);
   const fileName = useMemo(() => path.split(/[\\/]/).pop() ?? path, [path]);
 
   // pdf.js needs CMap tables for CJK PDFs that don't embed fonts, and
@@ -263,6 +279,39 @@ export function PdfView({
     if (!pageDims) return null;
     return Math.round((width / pageDims.w) * 100);
   }, [width, pageDims]);
+
+  const readingStyle = useMemo<CSSProperties>(
+    () => ({
+      fontFamily:
+        settings.font_family === "serif"
+          ? "var(--font-serif)"
+          : "var(--font-sans)",
+      fontSize: `${settings.font_size}px`,
+      lineHeight: settings.line_height,
+      maxWidth: `${settings.column_width}em`,
+    }),
+    [settings],
+  );
+
+  useEffect(() => {
+    if (!textMode || numPages === 0) return;
+    let cancelled = false;
+    setPageTextLoading(true);
+    ipc
+      .readPdfPageText(path, pageNum - 1)
+      .then((text) => {
+        if (!cancelled) setPageText(text);
+      })
+      .catch((e) => {
+        if (!cancelled) setPageText(`PDF 文本解析失败：${String(e)}`);
+      })
+      .finally(() => {
+        if (!cancelled) setPageTextLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [textMode, path, pageNum, numPages]);
 
   function zoomIn() {
     if (displayMode !== "custom") {
@@ -715,11 +764,17 @@ export function PdfView({
             查找
           </button>
           <button
+            onClick={() => setChatOpen(true)}
+            className="studio-ghost"
+          >
+            问 AI
+          </button>
+          <button
             onClick={() => {
               const tl = pageWrapRef.current?.querySelector(
                 ".react-pdf__Page__textContent",
               );
-              setMusicChapterText(tl?.textContent ?? "");
+              setMusicChapterText(textMode ? pageText : tl?.textContent ?? "");
               setMusicSuggestOpen(true);
             }}
             className="studio-ghost"
@@ -764,6 +819,13 @@ export function PdfView({
 
           {/* Display controls: zoom out / % / zoom in / fit modes / fullscreen */}
           <div className="flex items-center gap-1 ml-2 pl-2 border-l border-[var(--color-paper-edge)]">
+            <button
+              onClick={() => setTextMode((v) => !v)}
+              className={`studio-ghost ${textMode ? "studio-ghost-active" : ""}`}
+              title="切换 PDF 文本模式，让字体设置生效"
+            >
+              文本
+            </button>
             <button
               onClick={zoomOut}
               className="studio-icon-button"
@@ -873,7 +935,17 @@ export function PdfView({
             loading=""
             error=""
           >
-            {numPages > 0 && (
+            {numPages > 0 && textMode && (
+              <article
+                className={`reading mx-auto px-10 md:px-16 py-14 studio-panel whitespace-pre-wrap ${
+                  settings.paragraph_indent ? "" : "indent-none"
+                }`}
+                style={readingStyle}
+              >
+                {pageTextLoading ? "正在解析本页文本..." : pageText || "这一页没有可提取的文本。"}
+              </article>
+            )}
+            {numPages > 0 && !textMode && (
               <div
                 ref={pageWrapRef}
                 className="relative shadow-lg rounded-sm overflow-hidden bg-white"
@@ -1036,6 +1108,31 @@ export function PdfView({
           settings={settings}
           onChange={setSettings}
           onClose={() => setSettingsOpen(false)}
+        />
+      )}
+
+      {chatOpen && (
+        <ChatPanel
+          bookId={bookId}
+          bookPath={path}
+          bookTitle={fileName}
+          chapterSpineIndex={pageNum - 1}
+          chapterLabel={`第 ${pageNum} 页`}
+          chapterText={
+            textMode
+              ? pageText
+              : pageWrapRef.current?.querySelector(
+                  ".react-pdf__Page__textContent",
+                )?.textContent ?? ""
+          }
+          aiConfigured={
+            aiSettings.base_url.trim() !== "" &&
+            aiSettings.api_key.trim() !== "" &&
+            aiSettings.chat_model.trim() !== ""
+          }
+          onOpenSettings={onOpenAiSettings}
+          onJumpToChapter={(spineIdx) => goTo(spineIdx + 1)}
+          onClose={() => setChatOpen(false)}
         />
       )}
 

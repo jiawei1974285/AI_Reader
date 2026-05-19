@@ -40,6 +40,7 @@ pub fn run() {
             readers::mobi::read_mobi_initial,
             readers::mobi::read_mobi_chapter,
             readers::mobi::get_mobi_toc,
+            readers::pdf::read_pdf_page_text,
             commands::get_library_root,
             commands::set_library_root,
             commands::scan_library,

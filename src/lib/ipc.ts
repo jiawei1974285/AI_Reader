@@ -300,6 +300,8 @@ async function mockInvoke<T>(
     case "ai_chat_rag":
     case "ai_summarize_highlights":
       return "这是浏览器预览模式下的 AI 示例回答。真实 AI 调用会在 Tauri 应用中使用你配置的接口。" as T;
+    case "read_pdf_page_text":
+      return `这是浏览器预览模式下第 ${Number(args?.pageIndex ?? 0) + 1} 页的 PDF 文本。切到文本模式后，阅读器字体、字号和行距设置会作用在这里。` as T;
     case "ai_chat_stream":
     case "ai_chat_rag_stream":
       return undefined as T;
@@ -479,6 +481,8 @@ export const ipc = {
     invoke<ClassifyReport>("ai_classify_books", { force: force ?? false }),
   aiSummarizeHighlights: (bookId: number) =>
     invoke<string>("ai_summarize_highlights", { bookId }),
+  readPdfPageText: (path: string, pageIndex: number) =>
+    invoke<string>("read_pdf_page_text", { path, pageIndex }),
   chatHistoryLoad: (bookId: number, mode: string, spineIndex: number) =>
     invoke<ChatHistoryMsg[]>("chat_history_load", { bookId, mode, spineIndex }),
   chatHistoryAppend: (args: {

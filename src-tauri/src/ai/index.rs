@@ -16,8 +16,7 @@ pub struct ChapterText {
     pub text: String,
 }
 
-/// Extract plain text per chapter for any supported format. PDFs are
-/// out of scope here (no Rust-side PDF text extraction in our build).
+/// Extract plain text per chapter/page for any supported format.
 pub fn extract_chapters(path: &Path) -> Result<Vec<ChapterText>, String> {
     let ext = path
         .extension()
@@ -28,7 +27,8 @@ pub fn extract_chapters(path: &Path) -> Result<Vec<ChapterText>, String> {
         "epub" => extract_epub_chapters(path),
         "txt" => extract_txt_chapters(path),
         "docx" => extract_docx_chapters(path),
-        "pdf" => Err("PDF indexing not supported in this build (no Rust-side PDF text extraction)".to_string()),
+        "mobi" => extract_mobi_chapters(path),
+        "pdf" => extract_pdf_pages(path),
         other => Err(format!("Unsupported format for indexing: {other}")),
     }
 }
@@ -98,6 +98,29 @@ fn extract_docx_chapters(path: &Path) -> Result<Vec<ChapterText>, String> {
         spine_index: 0,
         text,
     }])
+}
+
+fn extract_mobi_chapters(path: &Path) -> Result<Vec<ChapterText>, String> {
+    Ok(crate::readers::mobi::extract_text_chapters(path)?
+        .into_iter()
+        .map(|(idx, text)| ChapterText {
+            spine_index: idx,
+            text,
+        })
+        .collect())
+}
+
+fn extract_pdf_pages(path: &Path) -> Result<Vec<ChapterText>, String> {
+    let pages = crate::readers::pdf::extract_pages(path)?;
+    Ok(pages
+        .into_iter()
+        .enumerate()
+        .map(|(idx, text)| ChapterText {
+            spine_index: idx,
+            text: text.trim().to_string(),
+        })
+        .filter(|ch| ch.text.chars().filter(|c| !c.is_whitespace()).count() >= 20)
+        .collect())
 }
 
 fn strip_html_to_text(html: &str) -> String {

@@ -2,6 +2,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use mobi::Mobi;
 use regex::Regex;
+use std::collections::HashMap;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;
 use std::sync::LazyLock;
@@ -195,29 +196,39 @@ fn read_body(path: &Path) -> Result<(String, String, String), String> {
 /// Map of `recindex` (1-based, as it appears in MOBI HTML) to a fully
 /// formed `data:image/...;base64,...` URI. `recindex` corresponds to the
 /// N-th image record returned by `image_records()`.
-fn collect_image_data_uris(m: &Mobi) -> Vec<String> {
-    let records = m.image_records();
-    records
-        .iter()
-        .map(|r| {
-            let bytes = r.content;
-            let mime = sniff_image_mime(bytes);
-            format!("data:{};base64,{}", mime, B64.encode(bytes))
-        })
-        .collect()
+fn collect_image_data_uris(m: &Mobi) -> HashMap<usize, String> {
+    let mut images = HashMap::new();
+    let first_image = m.metadata.mobi.first_image_index as usize;
+    let records = m.raw_records();
+    let mut ordinal = 1usize;
+
+    for (record_index, record) in records.records().iter().enumerate().skip(first_image) {
+        let bytes = record.content;
+        let Some(mime) = detect_image_mime(bytes) else {
+            continue;
+        };
+        let data_uri = format!("data:{};base64,{}", mime, B64.encode(bytes));
+
+        images.insert(ordinal, data_uri.clone());
+        images.insert(record_index, data_uri.clone());
+        images.insert(record_index.saturating_sub(first_image) + 1, data_uri);
+        ordinal += 1;
+    }
+
+    images
 }
 
-fn sniff_image_mime(bytes: &[u8]) -> &'static str {
+fn detect_image_mime(bytes: &[u8]) -> Option<&'static str> {
     if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
-        "image/jpeg"
+        Some("image/jpeg")
     } else if bytes.starts_with(&[0x89, 0x50, 0x4E, 0x47]) {
-        "image/png"
+        Some("image/png")
     } else if bytes.starts_with(b"GIF8") {
-        "image/gif"
+        Some("image/gif")
     } else if bytes.starts_with(b"RIFF") && bytes.len() > 12 && &bytes[8..12] == b"WEBP" {
-        "image/webp"
+        Some("image/webp")
     } else {
-        "image/jpeg"
+        None
     }
 }
 
@@ -233,7 +244,7 @@ static IMG_KINDLE_EMBED_RE: LazyLock<Regex> = LazyLock::new(|| {
         .unwrap()
 });
 
-fn inline_mobi_images(body: &str, images: &[String]) -> String {
+fn inline_mobi_images(body: &str, images: &HashMap<usize, String>) -> String {
     if images.is_empty() {
         return body.to_string();
     }
@@ -246,19 +257,18 @@ fn inline_mobi_images(body: &str, images: &[String]) -> String {
     pass2.into_owned()
 }
 
-fn replace_with_data_uri(caps: &regex::Captures, images: &[String]) -> String {
+fn replace_with_data_uri(caps: &regex::Captures, images: &HashMap<usize, String>) -> String {
     let before = caps.get(1).map(|m| m.as_str()).unwrap_or("");
     let n_str = caps.get(2).map(|m| m.as_str()).unwrap_or("");
     let after = caps.get(3).map(|m| m.as_str()).unwrap_or("");
     let Ok(n) = n_str.parse::<usize>() else {
         return caps.get(0).map(|m| m.as_str()).unwrap_or("").to_string();
     };
-    if n == 0 || n > images.len() {
+    let Some(data_uri) = images.get(&n) else {
         // No matching image record — drop the tag so we don't show a
         // broken-image icon.
         return String::new();
-    }
-    let data_uri = &images[n - 1];
+    };
     format!(r#"<img{} src="{}"{} />"#, before, data_uri, after)
 }
 
@@ -315,6 +325,22 @@ pub fn get_mobi_toc(path: String) -> Result<Vec<TocEntry>, String> {
 /// in the library) can't take down the whole app.
 pub fn extract_metadata(path: &Path) -> Result<(String, String), String> {
     guard("MOBI 元数据", || extract_metadata_inner(path))
+}
+
+pub fn extract_text_chapters(path: &Path) -> Result<Vec<(usize, String)>, String> {
+    guard("MOBI AI 文本", || {
+        let (_title, _author, body) = read_body(path)?;
+        Ok(split_chapters(&body)
+            .into_iter()
+            .enumerate()
+            .map(|(idx, ch)| (idx, normalize_text(&strip_tags(&ch.html))))
+            .filter(|(_, text)| text.chars().filter(|c| !c.is_whitespace()).count() >= 30)
+            .collect())
+    })
+}
+
+fn normalize_text(s: &str) -> String {
+    s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 fn extract_metadata_inner(path: &Path) -> Result<(String, String), String> {

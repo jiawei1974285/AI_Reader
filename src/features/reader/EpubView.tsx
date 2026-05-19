@@ -8,12 +8,9 @@ import {
 } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  DEFAULT_AI_SETTINGS,
   DEFAULT_READER_SETTINGS,
   ipc,
-  loadAiSettings,
   loadReaderSettings,
-  saveAiSettings,
   saveReaderSettings,
   type AiSettings,
   type EpubPreview,
@@ -35,6 +32,8 @@ import { BookSearch } from "./BookSearch";
 type Props = {
   path: string;
   bookId: number;
+  aiSettings: AiSettings;
+  onOpenAiSettings: () => void;
   onBack: () => void;
   backLabel?: string;
   initialSpine?: number;
@@ -65,6 +64,8 @@ type ActiveHighlight = {
 export function EpubView({
   path,
   bookId,
+  aiSettings,
+  onOpenAiSettings,
   onBack,
   backLabel = "返回书架",
   initialSpine,
@@ -86,7 +87,6 @@ export function EpubView({
     DEFAULT_READER_SETTINGS,
   );
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [aiSettings, setAiSettings] = useState<AiSettings>(DEFAULT_AI_SETTINGS);
   const [chatOpen, setChatOpen] = useState(false);
   const [musicSuggestOpen, setMusicSuggestOpen] = useState(false);
   const [lookupSel, setLookupSel] = useState<{
@@ -179,7 +179,6 @@ export function EpubView({
 
   useEffect(() => {
     loadReaderSettings().then(setSettings).catch(() => {});
-    loadAiSettings().then(setAiSettings).catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -188,13 +187,6 @@ export function EpubView({
     }, 200);
     return () => window.clearTimeout(t);
   }, [settings]);
-
-  useEffect(() => {
-    const t = window.setTimeout(() => {
-      saveAiSettings(aiSettings).catch(() => {});
-    }, 300);
-    return () => window.clearTimeout(t);
-  }, [aiSettings]);
 
   useEffect(() => {
     let cancelled = false;
@@ -812,7 +804,7 @@ export function EpubView({
           }
           onOpenSettings={() => {
             setLookupSel(null);
-            setSettingsOpen(true);
+            onOpenAiSettings();
           }}
           onClose={() => setLookupSel(null)}
         />
@@ -832,8 +824,6 @@ export function EpubView({
         <ReaderSettingsPanel
           settings={settings}
           onChange={setSettings}
-          aiSettings={aiSettings}
-          onAiChange={setAiSettings}
           onClose={() => setSettingsOpen(false)}
         />
       )}
@@ -862,7 +852,7 @@ export function EpubView({
           }
           onOpenSettings={() => {
             setChatOpen(false);
-            setSettingsOpen(true);
+            onOpenAiSettings();
           }}
           onJumpToChapter={(spineIdx) => jumpToChapter(spineIdx)}
           onClose={() => setChatOpen(false)}

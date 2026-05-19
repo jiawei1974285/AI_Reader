@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { LibraryView } from "@/features/library/LibraryView";
 import { EpubView } from "@/features/reader/EpubView";
 import { PdfView } from "@/features/reader/PdfView";
@@ -7,7 +7,9 @@ import { MusicView } from "@/features/music/MusicView";
 import { MusicMiniPlayer } from "@/features/music/MusicMiniPlayer";
 import { MusicPlayerProvider } from "@/features/music/MusicPlayerContext";
 import { StatsView } from "@/features/stats/StatsView";
-import type { Book } from "@/lib/ipc";
+import { DEFAULT_AI_SETTINGS, loadAiSettings, saveAiSettings } from "@/lib/ipc";
+import { GlobalAiSettingsPanel } from "@/features/settings/GlobalAiSettingsPanel";
+import type { AiSettings, Book } from "@/lib/ipc";
 
 type View =
   | { kind: "library" }
@@ -33,6 +35,27 @@ function App() {
 
 function AppShell() {
   const [view, setView] = useState<View>({ kind: "library" });
+  const [aiSettings, setAiSettings] = useState<AiSettings>(DEFAULT_AI_SETTINGS);
+  const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+
+  useEffect(() => {
+    loadAiSettings().then(setAiSettings).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const t = window.setTimeout(() => {
+      saveAiSettings(aiSettings).catch(() => {});
+    }, 300);
+    return () => window.clearTimeout(t);
+  }, [aiSettings]);
+
+  const globalSettingsPanel = aiSettingsOpen ? (
+    <GlobalAiSettingsPanel
+      settings={aiSettings}
+      onChange={setAiSettings}
+      onClose={() => setAiSettingsOpen(false)}
+    />
+  ) : null;
 
   if (view.kind === "reader") {
     const backLabel =
@@ -45,26 +68,36 @@ function AppShell() {
 
     if (view.book.format === "pdf") {
       return (
-        <PdfView
+        <>
+          <PdfView
+            path={view.book.file_path}
+            bookId={view.book.id}
+            aiSettings={aiSettings}
+            onOpenAiSettings={() => setAiSettingsOpen(true)}
+            initialSpine={view.initialSpine}
+            initialHighlightId={view.initialHighlight}
+            backLabel={backLabel}
+            onBack={onBack}
+          />
+          {globalSettingsPanel}
+        </>
+      );
+    }
+
+    return (
+      <>
+        <EpubView
           path={view.book.file_path}
           bookId={view.book.id}
+          aiSettings={aiSettings}
+          onOpenAiSettings={() => setAiSettingsOpen(true)}
           initialSpine={view.initialSpine}
           initialHighlightId={view.initialHighlight}
           backLabel={backLabel}
           onBack={onBack}
         />
-      );
-    }
-
-    return (
-      <EpubView
-        path={view.book.file_path}
-        bookId={view.book.id}
-        initialSpine={view.initialSpine}
-        initialHighlightId={view.initialHighlight}
-        backLabel={backLabel}
-        onBack={onBack}
-      />
+        {globalSettingsPanel}
+      </>
     );
   }
 
@@ -105,14 +138,18 @@ function AppShell() {
   }
 
   return (
-    <LibraryView
-      onOpenBook={(book) =>
-        setView({ kind: "reader", book, returnTo: "library" })
-      }
-      onOpenNotes={() => setView({ kind: "notes" })}
-      onOpenMusic={() => setView({ kind: "music" })}
-      onOpenStats={() => setView({ kind: "stats" })}
-    />
+    <>
+      <LibraryView
+        onOpenBook={(book) =>
+          setView({ kind: "reader", book, returnTo: "library" })
+        }
+        onOpenNotes={() => setView({ kind: "notes" })}
+        onOpenMusic={() => setView({ kind: "music" })}
+        onOpenStats={() => setView({ kind: "stats" })}
+        onOpenAiSettings={() => setAiSettingsOpen(true)}
+      />
+      {globalSettingsPanel}
+    </>
   );
 }
 
