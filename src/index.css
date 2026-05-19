@@ -304,15 +304,20 @@ body {
 }
 
 /* EPUB / MOBI readers now inline images as base64 data: URIs (Phase 1 has
- * landed in epub.rs::inline_images and mobi.rs::inline_mobi_images). Only
- * hide <img> tags whose src couldn't be resolved — those would render as
- * broken-image icons. Inlined data: URIs render normally.
- * SVG / <picture> / <video> stay hidden — no reader inlines those yet. */
+ * landed in epub.rs::inline_images and mobi.rs::inline_mobi_images).
+ *
+ * <img>:    hide only those whose src can't be resolved (non-data: URI).
+ * <image>:  same logic — EPUBs wrap images in <svg><image href="data:..."/>
+ *           so we must let inline-data <image> render.
+ * <svg>:    do NOT hide. Many EPUBs use it solely as a viewport for the
+ *           <image> above; killing svg kills the image with it.
+ * <picture>/<video>: stay hidden — no reader inlines those yet. */
 article img:not([src^="data:"]) {
   display: none !important;
 }
-article svg,
-article image,
+article image:not([href^="data:"]):not([xlink\:href^="data:"]) {
+  display: none !important;
+}
 article picture,
 article video {
   display: none !important;

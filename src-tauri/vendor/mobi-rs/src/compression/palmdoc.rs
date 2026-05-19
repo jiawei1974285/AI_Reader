@@ -49,14 +49,24 @@ pub fn decompress_into(data: &[u8], text: &mut Vec<u8>) {
                     text_pos - offset
                 };
 
-                let end = if start + len >= text.len() {
-                    text.len()
-                } else {
-                    start + len
-                };
-
-                for i in start..end {
-                    text.push(text[i]);
+                // [AIreader patch] PalmDOC LZ77 allows self-referencing
+                // copy: when offset < len, the source range overlaps the
+                // (still-growing) destination, producing RLE expansion
+                // (every push makes the next read see the byte we just
+                // wrote). Upstream cached `end = min(start + len, text.len())`
+                // OUTSIDE the loop, so RLE references were truncated to
+                // `offset` bytes — losing `len - offset` bytes per such
+                // reference. For CJK MOBIs that hits often (repeated
+                // punctuation like "，，" gets RLE-encoded), producing
+                // the mid-paragraph garbage bursts users see.
+                // Replace with a simple len-bounded loop that reads the
+                // index after each push, so growing `text` is visible.
+                for k in 0..len {
+                    let idx = start + k;
+                    if idx >= text.len() {
+                        break; // malformed input — bail rather than panic
+                    }
+                    text.push(text[idx]);
                     text_pos += 1;
                 }
             }

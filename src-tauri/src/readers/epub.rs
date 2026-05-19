@@ -407,8 +407,9 @@ fn guess_mime_from_ext(p: &Path) -> String {
     .to_string()
 }
 
-static SVG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<svg\b[^>]*>.*?</svg\s*>").unwrap());
+// SVG_RE was removed: stripping whole <svg> blocks discarded EPUB images
+// that inline_images had already rewritten into data: URIs nested inside
+// <image xlink:href="data:..."/> children. See strip_visual().
 static IMG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<img\b[^>]*/?>").unwrap());
 static IMAGE_RE: LazyLock<Regex> =
@@ -434,8 +435,14 @@ fn looks_like_toc(html: &str) -> bool {
 /// kept; only un-rewritten <img>/<image> with relative or unknown src
 /// are dropped.
 fn strip_visual(html: &str) -> String {
-    let s = SVG_RE.replace_all(html, "");
-    let s = IMG_RE.replace_all(&s, |caps: &regex::Captures| {
+    // NOTE: We intentionally do NOT strip <svg>...</svg> as a whole here.
+    // EPUB chapters commonly wrap their inlined images inside an <svg> with
+    // viewBox + <image xlink:href="data:..."> child — `inline_images` has
+    // already rewritten the inner <image>'s href to a data URI. Killing the
+    // whole svg block would discard the (now-valid) image with it.
+    // SVG fragments that have nothing inlinable end up as empty <svg/>
+    // wrappers, which the browser renders as a 0×0 box — harmless.
+    let s = IMG_RE.replace_all(html, |caps: &regex::Captures| {
         let tag = caps.get(0).map(|m| m.as_str()).unwrap_or("");
         // Keep <img> only if it points at an inlined data URI we created.
         if tag.contains("src=\"data:") || tag.contains("src='data:") {
