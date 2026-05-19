@@ -25,12 +25,34 @@ pub fn ensure_loaded(cache_dir: PathBuf) -> Result<(), String> {
         return Ok(());
     }
     let _ = std::fs::create_dir_all(&cache_dir);
+
+    // fastembed → hf-hub talks to `huggingface.co` by default, which is
+    // effectively unreachable from mainland China (extreme latency / TLS
+    // resets) and surfaces as "Failed to retrieve onnx/model.onnx" with
+    // no actionable signal in the UI. `hf-hub` honours the `HF_ENDPOINT`
+    // env var, so we point it at the public hf-mirror.com proxy unless
+    // the user has explicitly configured something else before launch.
+    // Power users keep their override; everyone else just works.
+    if std::env::var_os("HF_ENDPOINT").is_none() {
+        std::env::set_var("HF_ENDPOINT", "https://hf-mirror.com");
+    }
+    let endpoint = std::env::var("HF_ENDPOINT")
+        .unwrap_or_else(|_| "https://huggingface.co".to_string());
+
     let model = TextEmbedding::try_new(
         InitOptions::new(EmbeddingModel::BGESmallZHV15)
             .with_cache_dir(cache_dir)
             .with_show_download_progress(true),
     )
-    .map_err(|e| format!("加载嵌入模型失败：{e}"))?;
+    .map_err(|e| {
+        format!(
+            "加载嵌入模型失败（镜像源：{endpoint}）：{e}\n\
+             首次使用需要下载 BGE-Small-ZH-V1.5（约 120 MB）。\n\
+             • 若下载超时，可设环境变量 HF_ENDPOINT 后重启 \
+             （默认已用 https://hf-mirror.com）\n\
+             • 或清空 embed_cache 目录后重试"
+        )
+    })?;
     *g = Some(model);
     Ok(())
 }
