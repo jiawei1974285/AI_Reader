@@ -46,7 +46,41 @@ export function LookupBubble({
   const [saving, setSaving] = useState<boolean>(false);
   const [saved, setSaved] = useState<boolean>(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
+  // Wall-clock seconds since the AI request started (for the loading
+  // indicator). Lets the user see whether something is happening at all.
+  const [elapsedS, setElapsedS] = useState<number>(0);
   const bubbleRef = useRef<HTMLDivElement>(null);
+
+  // Tick a 1-second counter while a request is in flight, so the loading
+  // label can show real elapsed time. Auto-surface a meaningful error if
+  // we cross 30 s with zero data — that almost always means base_url is
+  // wrong, the API key is invalid, or the network can't reach the
+  // upstream service. Without this the bubble would silently stick on
+  // "AI 思考中…" for the full 180 s reqwest timeout.
+  useEffect(() => {
+    if (!loading) {
+      setElapsedS(0);
+      return;
+    }
+    const start = Date.now();
+    const t = window.setInterval(() => {
+      const s = Math.floor((Date.now() - start) / 1000);
+      setElapsedS(s);
+      if (s >= 30 && reply === "") {
+        setError(
+          "30 秒未收到 AI 响应。最常见原因：\n" +
+          "• base_url 末尾别带 /v1/chat/completions（我们会自动拼）\n" +
+          "• api_key 失效或额度耗尽\n" +
+          "• 网络到 base_url 主机不通 / 被代理拦截\n\n" +
+          "可在 PowerShell 里直接测：\n" +
+          "Invoke-RestMethod -Uri \"<base_url>/v1/models\" " +
+          "-Headers @{ \"Authorization\" = \"Bearer <api_key>\" } -TimeoutSec 10"
+        );
+        setLoading(false);
+      }
+    }, 1000);
+    return () => window.clearInterval(t);
+  }, [loading, reply]);
 
   // Position: prefer below selection, flip above if it would overflow
   const goAbove = rect.bottom + BUBBLE_EST_HEIGHT + 16 > window.innerHeight;
@@ -196,9 +230,13 @@ export function LookupBubble({
             </button>
           </div>
         ) : loading ? (
-          <p className="text-sm text-[var(--color-muted)] italic">AI 思考中…</p>
+          <p className="text-sm text-[var(--color-muted)] italic">
+            AI 思考中…{elapsedS > 0 ? ` ${elapsedS}s` : ""}
+          </p>
         ) : error ? (
-          <p className="text-xs text-red-600 leading-relaxed">{error}</p>
+          <p className="text-xs text-red-600 leading-relaxed whitespace-pre-wrap">
+            {error}
+          </p>
         ) : (
           <>
             <p className="text-sm text-[var(--color-ink)] leading-relaxed whitespace-pre-wrap">

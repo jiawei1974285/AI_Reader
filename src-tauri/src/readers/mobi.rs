@@ -1,6 +1,7 @@
 use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chardetng::EncodingDetector;
+use encoding_rs::Encoding;
 use mobi::headers::TextEncoding;
 use mobi::Mobi;
 use regex::Regex;
@@ -272,21 +273,22 @@ fn read_body(path: &Path) -> Result<(String, String, String), String> {
     Ok((title, author, body))
 }
 
-/// Decode raw MOBI content bytes to a String. Strategy:
-///   1. Strict UTF-8 — clean books win immediately, zero overhead.
-///   2. Run chardetng FIRST (not as a fallback). If it picks any
-///      non-UTF-8 encoding, that's a strong signal the MOBI's
-///      header_hint is lying about UTF-8 and we trust chardetng's
-///      pick. Reason: GBK content commonly has lead bytes in the
-///      0xE0-0xEF range (CJK first-byte zone) which `String::from_
-///      utf8_lossy` treats as valid 3-byte UTF-8 lead, producing
-///      VALID-LOOKING-but-wrong CJK characters (rare/extension
-///      ideographs) instead of `�` — the old fffd-rate gate let
-///      these books slip through entirely garbled. chardetng with
-///      `cn` TLD hint is the only signal that catches them.
-///   3. If chardetng agrees on UTF-8, fall back to UTF-8 lossy.
-///      That handles the "mostly UTF-8 + a few corrupt bytes"
-///      case (preserves 95%+ correct CJK + sprinkled `�`).
+/// Decode raw MOBI content bytes to a String.
+///
+/// We deliberately don't trust any single signal:
+///   - the MOBI header's encoding field lies for many Chinese books
+///   - chardetng can pick UTF-8 for GBK content when the body has enough
+///     ASCII scaffolding (HTML tags, numbers) — its statistics tilt
+///     toward UTF-8 for "mostly-ASCII looking" inputs
+///   - `String::from_utf8_lossy` can produce VALID-but-wrong CJK chars
+///     when GBK lead bytes 0xE0-0xEF happen to form valid UTF-8 3-byte
+///     leads — landing in rare/extension ideographs ("琛屾楃" pattern)
+///     with no `�` markers to flag the failure
+///
+/// Strategy: try multiple candidate encodings in parallel and score by
+/// CJK-common-zone density. The encoding whose decoded text places the
+/// most characters in the GB2312 common region (0x4E00..0x82FF) and the
+/// least in extension ranges (0x8300+, Ext-A) wins.
 ///
 /// `header_hint` is only logged for diagnostics — we don't trust it.
 fn decode_content_bytes(bytes: &[u8], header_hint: TextEncoding) -> String {
@@ -296,52 +298,107 @@ fn decode_content_bytes(bytes: &[u8], header_hint: TextEncoding) -> String {
 
     let mut detector = EncodingDetector::new();
     detector.feed(bytes, true);
-    // `cn` TLD biases toward GBK/GB18030 over Latin-1 when statistics
-    // are borderline — essential for CJK MOBIs whose body bytes contain
-    // enough high-bit distribution to look "Western" to a naive detector.
-    let guessed = detector.guess(Some(b"cn"), true);
+    // `cn` TLD biases toward GBK/GB18030 over Latin-1.
+    let chardetng_pick = detector.guess(Some(b"cn"), true);
 
-    // Non-UTF-8 guess → the MOBI header is lying. Trust chardetng even
-    // if UTF-8 lossy looks clean: GBK lead bytes 0xE0-0xEF map to valid
-    // 3-byte UTF-8 leads and silently produce wrong-but-valid CJK chars.
-    if guessed != encoding_rs::UTF_8 {
-        let (text, _, had_errors) = guessed.decode(bytes);
-        let resulting_fffd_rate = fffd_rate(&text);
+    // Candidate encodings to try. Order doesn't matter — we pick by score.
+    // Dedupe by pointer identity since chardetng's pick is often UTF-8 or
+    // one of the explicit candidates below.
+    let candidates: [&'static Encoding; 4] = [
+        chardetng_pick,
+        encoding_rs::GBK,
+        encoding_rs::GB18030,
+        encoding_rs::UTF_8,
+    ];
+
+    let mut seen: Vec<&'static Encoding> = Vec::new();
+    let mut best: Option<(&'static Encoding, String, f64)> = None;
+
+    for enc in candidates.iter() {
+        if seen.iter().any(|e| std::ptr::eq(*e, *enc)) {
+            continue;
+        }
+        seen.push(*enc);
+
+        let text = if std::ptr::eq(*enc, encoding_rs::UTF_8) {
+            String::from_utf8_lossy(bytes).into_owned()
+        } else {
+            enc.decode(bytes).0.into_owned()
+        };
+        let s = decode_quality_score(&text);
         eprintln!(
-            "[mobi/aireader] decode_content_bytes: {} bytes, header_hint={:?}, \
-             chardetng picked {} (fffd={:.4}, errors={}) → used",
-            bytes.len(),
-            header_hint,
-            guessed.name(),
-            resulting_fffd_rate,
-            had_errors
+            "[mobi/aireader] decode candidate: {} score={:.4}",
+            enc.name(),
+            s
         );
-        return text.into_owned();
+        if best.as_ref().map_or(true, |b| s > b.2) {
+            best = Some((*enc, text, s));
+        }
     }
 
-    // chardetng agrees this is UTF-8. The strict pass already failed,
-    // so we have at least one bad byte — return lossy and accept the
-    // sprinkled `�` (typical for an *almost*-UTF-8 MOBI with a few
-    // corruption sites).
-    let utf8_lossy: String = String::from_utf8_lossy(bytes).into_owned();
-    let utf8_fffd_rate = fffd_rate(&utf8_lossy);
+    let (winner_enc, winner_text, winner_score) = best.unwrap_or_else(|| {
+        (
+            encoding_rs::UTF_8,
+            String::from_utf8_lossy(bytes).into_owned(),
+            0.0,
+        )
+    });
+
     eprintln!(
-        "[mobi/aireader] decode_content_bytes: {} bytes, header={:?}, \
-         chardetng=UTF-8 (utf8_lossy fffd_rate={:.4}) → utf-8 lossy",
+        "[mobi/aireader] decode_content_bytes: {} bytes, header_hint={:?}, \
+         chardetng_pick={}, WINNER={} (score={:.4})",
         bytes.len(),
         header_hint,
-        utf8_fffd_rate
+        chardetng_pick.name(),
+        winner_enc.name(),
+        winner_score
     );
-    utf8_lossy
+
+    winner_text
 }
 
-fn fffd_rate(s: &str) -> f64 {
+/// Quality score for a decoded text candidate. Higher = better.
+///
+/// Built on three observations of CJK MOBI corpus:
+///   1. Real Chinese text concentrates in the GB2312 common region —
+///      0x4E00..=0x82FF (~6800 most-frequent ideographs). >90% of any
+///      real Chinese page has chars in this range.
+///   2. GBK-misread-as-UTF-8 (or any encoding mismatch) sprinkles chars
+///      across the GBK/GB18030 extension ranges (0x8300..=0x9FFF) and
+///      CJK Extension A (0x3400..=0x4DBF). Real text rarely lives here.
+///   3. U+FFFD is a hard "couldn't decode" marker.
+///
+/// We reward common-zone CJK + ASCII, penalize extension-zone CJK + FFFD.
+fn decode_quality_score(s: &str) -> f64 {
     let total = s.chars().count();
     if total == 0 {
         return 0.0;
     }
-    let bad = s.chars().filter(|c| *c == '\u{FFFD}').count();
-    bad as f64 / total as f64
+    let total_f = total as f64;
+
+    let mut common = 0usize;
+    let mut extended = 0usize;
+    let mut ascii = 0usize;
+    let mut fffd = 0usize;
+
+    for c in s.chars() {
+        let code = c as u32;
+        if c == '\u{FFFD}' {
+            fffd += 1;
+        } else if code < 0x80 {
+            ascii += 1;
+        } else if (0x4E00..=0x82FF).contains(&code) {
+            common += 1;
+        } else if (0x8300..=0x9FFF).contains(&code) || (0x3400..=0x4DBF).contains(&code) {
+            extended += 1;
+        }
+        // Other Unicode chars (punctuation, fullwidth, etc.) score neutral
+    }
+
+    (common as f64 / total_f) * 1.2
+        + (ascii as f64 / total_f) * 0.5
+        - (extended as f64 / total_f) * 1.5
+        - (fffd as f64 / total_f) * 1.0
 }
 
 /// Map of `recindex` (1-based, as it appears in MOBI HTML) to a fully
