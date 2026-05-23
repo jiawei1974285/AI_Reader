@@ -27,6 +27,8 @@
 |---|---|---|---|
 | `get_progress` | `book_id: i64` | `Option<ReadingProgress>` | 取上次进度 |
 | `save_progress` | `book_id, spine_index, scroll_y` | `()` | 保存进度（throttle 调用） |
+| `create_bookmark` | `bookId, spineIndex, scrollY, label, excerpt` | `Bookmark` | 保存当前阅读位置为书签 |
+| `list_recent_bookmarks` | `limit?: i64` | `Vec<BookmarkWithBook>` | 首页读取最近书签入口 |
 | `add_read_time` | `book_id, delta_ms: i64` | `()` | 累计阅读时长（心跳调） |
 
 ### Reader 设置
@@ -49,9 +51,9 @@
 | `read_docx_initial` | `path: String` | `EpubPreview` | DOCX 第一章 |
 | `read_docx_chapter` | `path, spine_index` | `EpubPreview` | DOCX 指定章 |
 | `get_docx_toc` | `path: String` | `Vec<TocEntry>` | DOCX 按 Heading 抽 |
-| `read_mobi_initial` | `path: String` | `EpubPreview` | MOBI 第一章 |
-| `read_mobi_chapter` | `path, spine_index` | `EpubPreview` | MOBI 指定章 |
-| `get_mobi_toc` | `path: String` | `Vec<TocEntry>` | MOBI 按 `<mbp:pagebreak/>` 切伪章节 |
+| `read_mobi_initial` | `path: String` | `EpubPreview` | MOBI / AZW / AZW3 第一章；加密或不可可靠解析时返回错误 |
+| `read_mobi_chapter` | `path, spine_index` | `EpubPreview` | MOBI / AZW / AZW3 指定章 |
+| `get_mobi_toc` | `path: String` | `Vec<TocEntry>` | MOBI / AZW / AZW3 按 pagebreak、标题或长度 fallback 切章节 |
 
 > PDF 不走 Tauri，直接 `convertFileSrc(path)` 喂给 react-pdf。
 
@@ -72,6 +74,7 @@
 |---|---|---|---|
 | `get_ai_settings` | — | `Option<String>` | JSON 字符串 |
 | `set_ai_settings` | `value: String` | `()` | 整体覆盖 |
+| `test_ai_model` | `baseUrl, apiKey, chatModel, temperature?, fastMode?` | `String` | 用非流式 ChatCompletions 链路测试模型是否可用 |
 
 ### AI — 聊天
 
@@ -81,6 +84,7 @@
 | `ai_chat_stream` | `messages, session_id` | `()` | 流式，结果通过 `chat-delta` 事件推送 |
 | `ai_chat_rag` | `question, bookId?, history` | `String` | 非流式 RAG（已废弃，保留兼容） |
 | `ai_chat_rag_stream` | `question, bookId?, history, session_id` | `()` | 流式 RAG，先发 `chat-context` 后流 `chat-delta` |
+| `ai_extract_entities` | `chapterLabel, chapterText` | `Vec<ChapterEntity>` | 提取当前章节人名 / 地名和简介 |
 | `ai_summarize_highlights` | `bookId` | `String` | 把当前书所有 highlight 喂 LLM 输出要点 + 主线 |
 
 ### AI — 索引 / 推荐 / 分类
@@ -155,7 +159,7 @@ await ipc.aiChatStream(messages, sessionId);
 type Book = {
   id: number;
   file_path: string;
-  format: "epub" | "txt" | "pdf" | "docx" | "mobi";
+  format: "epub" | "txt" | "pdf" | "docx" | "mobi" | "azw" | "azw3";
   title: string;
   author: string;
   added_at: number;       // unix ms
@@ -165,6 +169,15 @@ type Book = {
   last_read_at: number | null;
   cover_path: string | null;
   read_time_ms: number;
+};
+```
+
+### ChapterEntity
+```ts
+type ChapterEntity = {
+  name: string;
+  kind: "person" | "place" | string;
+  summary: string;
 };
 ```
 
@@ -219,6 +232,26 @@ type HighlightWithBook = Highlight & {
   book_title: string;
   book_author: string;
   book_format: string;
+};
+```
+
+### Bookmark / BookmarkWithBook
+```ts
+type Bookmark = {
+  id: number;
+  book_id: number;
+  spine_index: number;
+  scroll_y: number;
+  label: string;
+  excerpt: string;
+  created_at: number;
+};
+
+type BookmarkWithBook = Bookmark & {
+  book_title: string;
+  book_author: string;
+  book_format: string;
+  book_path: string;
 };
 ```
 

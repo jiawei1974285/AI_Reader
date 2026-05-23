@@ -63,11 +63,9 @@ pub async fn tag_all_tracks(
         let conn = state.db.lock().map_err(|e| e.to_string())?;
         tracks
             .iter()
-            .filter(|t| {
-                match db::get_track_tag(&conn, &t.path).ok().flatten() {
-                    Some(tag) => tag.file_mtime != t.modified_at,
-                    None => true,
-                }
+            .filter(|t| match db::get_track_tag(&conn, &t.path).ok().flatten() {
+                Some(tag) => tag.file_mtime != t.modified_at,
+                None => true,
             })
             .collect()
     };
@@ -101,13 +99,10 @@ pub async fn tag_all_tracks(
         match tag_batch(&state, batch).await {
             Ok(items) => {
                 // Embed descriptions in one batch
-                let descs: Vec<String> =
-                    items.iter().map(|i| i.description.clone()).collect();
-                let embeddings = tokio::task::spawn_blocking(move || {
-                    embed::embed_sync(descs)
-                })
-                .await
-                .map_err(|e| e.to_string())??;
+                let descs: Vec<String> = items.iter().map(|i| i.description.clone()).collect();
+                let embeddings = tokio::task::spawn_blocking(move || embed::embed_sync(descs))
+                    .await
+                    .map_err(|e| e.to_string())??;
 
                 let now_ms = chrono_now_ms();
                 let conn = state.db.lock().map_err(|e| e.to_string())?;
@@ -117,8 +112,8 @@ pub async fn tag_all_tracks(
                         .get(i)
                         .map(|v| embed::embedding_to_blob(v))
                         .unwrap_or_default();
-                    let mood_json = serde_json::to_string(&item.mood_tags)
-                        .unwrap_or_else(|_| "[]".to_string());
+                    let mood_json =
+                        serde_json::to_string(&item.mood_tags).unwrap_or_else(|_| "[]".to_string());
                     if let Err(_e) = db::upsert_track_tag(
                         &conn,
                         &track.path,
@@ -159,10 +154,7 @@ pub async fn tag_all_tracks(
     })
 }
 
-async fn tag_batch(
-    state: &State<'_, AppState>,
-    batch: &[&Track],
-) -> Result<Vec<TagItem>, String> {
+async fn tag_batch(state: &State<'_, AppState>, batch: &[&Track]) -> Result<Vec<TagItem>, String> {
     let mut listing = String::new();
     for (i, t) in batch.iter().enumerate() {
         listing.push_str(&format!("{}. {}\n", i + 1, t.filename));

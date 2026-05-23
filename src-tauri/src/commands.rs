@@ -1,4 +1,5 @@
 use crate::db;
+use crate::library::douban;
 use crate::library::scanner::{self, ScanReport};
 use crate::library::watcher;
 use crate::state::AppState;
@@ -54,10 +55,7 @@ pub fn start_library_watcher(
 }
 
 #[tauri::command]
-pub fn scan_library(
-    state: State<AppState>,
-    app: tauri::AppHandle,
-) -> Result<ScanReport, String> {
+pub fn scan_library(state: State<AppState>, app: tauri::AppHandle) -> Result<ScanReport, String> {
     use tauri::Manager;
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let covers_dir = app_data.join("covers");
@@ -74,6 +72,55 @@ pub fn list_books(state: State<AppState>) -> Result<Vec<db::Book>, String> {
     db::list_books(&conn).map_err(|e| e.to_string())
 }
 
+#[tauri::command]
+pub fn get_douban_metadata(
+    book_id: i64,
+    state: State<AppState>,
+) -> Result<Option<db::DoubanMetadata>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::get_douban_metadata(&conn, book_id).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DoubanRefreshReport {
+    pub scheduled: usize,
+}
+
+#[tauri::command]
+pub fn refresh_douban_metadata(
+    force: Option<bool>,
+    state: State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<DoubanRefreshReport, String> {
+    use tauri::Manager;
+    let force = force.unwrap_or(false);
+    let books = {
+        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        db::list_books_for_douban_refresh(&conn, force).map_err(|e| e.to_string())?
+    };
+    let scheduled = books.len();
+    if scheduled == 0 {
+        return Ok(DoubanRefreshReport { scheduled });
+    }
+
+    let db_path = app
+        .path()
+        .app_data_dir()
+        .map_err(|e| e.to_string())?
+        .join("aireader.db");
+    tauri::async_runtime::spawn(async move {
+        for book in books {
+            let metadata = douban::fetch_book_metadata(&book).await;
+            if let Ok(conn) = db::open(&db_path) {
+                let _ = db::upsert_douban_metadata(&conn, &metadata);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1200)).await;
+        }
+    });
+
+    Ok(DoubanRefreshReport { scheduled })
+}
+
 /// Remove a book from the library WITHOUT deleting the underlying file.
 /// CASCADE drops dependent rows: reading_progress, highlights, book_chunks,
 /// book_index_status, chat_messages. The on-disk file at `books.file_path`
@@ -86,16 +133,16 @@ pub fn list_books(state: State<AppState>) -> Result<Vec<db::Book>, String> {
 #[tauri::command]
 pub fn remove_book(book_id: i64, state: State<AppState>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    conn.execute("DELETE FROM books WHERE id = ?1", rusqlite::params![book_id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "DELETE FROM books WHERE id = ?1",
+        rusqlite::params![book_id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
-pub fn get_book_by_path(
-    path: String,
-    state: State<AppState>,
-) -> Result<Option<db::Book>, String> {
+pub fn get_book_by_path(path: String, state: State<AppState>) -> Result<Option<db::Book>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::get_book_by_path(&conn, &path).map_err(|e| e.to_string())
 }
@@ -122,6 +169,66 @@ pub fn save_progress(
         .as_millis() as i64;
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::save_progress(&conn, book_id, spine_index, scroll_y, now_ms).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn create_bookmark(
+    book_id: i64,
+    spine_index: i64,
+    scroll_y: f64,
+    label: String,
+    excerpt: String,
+    state: State<AppState>,
+) -> Result<db::Bookmark, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let id = db::create_bookmark(
+        &conn,
+        book_id,
+        spine_index,
+        scroll_y,
+        &label,
+        &excerpt,
+        now_ms,
+    )
+    .map_err(|e| e.to_string())?;
+    Ok(db::Bookmark {
+        id,
+        book_id,
+        spine_index,
+        scroll_y,
+        label,
+        excerpt,
+        created_at: now_ms,
+    })
+}
+
+#[tauri::command]
+pub fn list_recent_bookmarks(
+    limit: Option<i64>,
+    state: State<AppState>,
+) -> Result<Vec<db::BookmarkWithBook>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let limit = limit.unwrap_or(100).clamp(1, 500);
+    db::list_recent_bookmarks(&conn, limit).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_bookmarks_by_book(
+    book_id: i64,
+    state: State<AppState>,
+) -> Result<Vec<db::Bookmark>, String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::list_bookmarks_by_book(&conn, book_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_bookmark(id: i64, state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    db::delete_bookmark(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -265,8 +372,7 @@ pub fn chat_history_load(
     state: State<AppState>,
 ) -> Result<Vec<db::ChatHistoryMsg>, String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::list_chat_messages(&conn, book_id, &mode, spine_index)
-        .map_err(|e| e.to_string())
+    db::list_chat_messages(&conn, book_id, &mode, spine_index).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -292,11 +398,7 @@ pub fn chat_history_append(
 /// visible). Frontend caps the delta to a sensible max so a stalled
 /// session can't bank false hours.
 #[tauri::command]
-pub fn add_read_time(
-    book_id: i64,
-    delta_ms: i64,
-    state: State<AppState>,
-) -> Result<(), String> {
+pub fn add_read_time(book_id: i64, delta_ms: i64, state: State<AppState>) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
     db::add_read_time(&conn, book_id, delta_ms).map_err(|e| e.to_string())
 }
@@ -309,27 +411,21 @@ pub fn chat_history_clear(
     state: State<AppState>,
 ) -> Result<(), String> {
     let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::clear_chat_messages(&conn, book_id, &mode, spine_index)
-        .map_err(|e| e.to_string())
+    db::clear_chat_messages(&conn, book_id, &mode, spine_index).map_err(|e| e.to_string())
 }
 
 /// Decrypt a NetEase `.ncm` audio file into our music cache and return
 /// the absolute path of the decrypted (mp3/flac) file. Subsequent calls
 /// for the same source hit the cache instantly.
 #[tauri::command]
-pub async fn decrypt_ncm(
-    path: String,
-    app: tauri::AppHandle,
-) -> Result<String, String> {
+pub async fn decrypt_ncm(path: String, app: tauri::AppHandle) -> Result<String, String> {
     use tauri::Manager;
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let cache_dir = app_data.join("music_cache");
     let src = std::path::PathBuf::from(path);
-    tokio::task::spawn_blocking(move || {
-        crate::music::ncm::decrypt_to_cache(&src, &cache_dir)
-    })
-    .await
-    .map_err(|e| e.to_string())?
+    tokio::task::spawn_blocking(move || crate::music::ncm::decrypt_to_cache(&src, &cache_dir))
+        .await
+        .map_err(|e| e.to_string())?
 }
 
 /// Read the LRC lyric file that sits next to an audio file (same stem,

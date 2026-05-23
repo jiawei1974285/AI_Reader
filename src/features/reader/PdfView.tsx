@@ -1,4 +1,10 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type CSSProperties,
+} from "react";
 import { Document, Page, pdfjs } from "react-pdf";
 import type { PDFDocumentProxy } from "pdfjs-dist";
 import "react-pdf/dist/Page/AnnotationLayer.css";
@@ -10,6 +16,7 @@ import {
   ipc,
   loadReaderSettings,
   saveReaderSettings,
+  type Bookmark,
   type Highlight,
   type AiSettings,
   type ReaderSettings,
@@ -25,6 +32,7 @@ import { ReaderSettingsPanel } from "./ReaderSettings";
 import { ChatPanel } from "./ChatPanel";
 import { captureSelection } from "./highlight";
 import { BookSearch } from "./BookSearch";
+import { BookmarksPanel } from "./BookmarksPanel";
 
 // Bundle the pdf.js worker via Vite's URL resolution so it ships with the app
 // in both dev and production builds.
@@ -41,6 +49,7 @@ type Props = {
   onBack: () => void;
   backLabel?: string;
   initialSpine?: number;
+  initialScrollY?: number;
   initialHighlightId?: number;
 };
 
@@ -78,6 +87,7 @@ export function PdfView({
   onBack,
   backLabel = "返回书架",
   initialSpine,
+  initialScrollY,
   initialHighlightId,
 }: Props) {
   const [numPages, setNumPages] = useState<number>(0);
@@ -86,19 +96,25 @@ export function PdfView({
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [containerSize, setContainerSize] = useState({ w: 800, h: 600 });
-  const [pageDims, setPageDims] = useState<{ w: number; h: number } | null>(null);
-  const [displayMode, setDisplayMode] = useState<"fit-width" | "fit-page" | "custom">(
-    "fit-width",
+  const [pageDims, setPageDims] = useState<{ w: number; h: number } | null>(
+    null,
   );
+  const [displayMode, setDisplayMode] = useState<
+    "fit-width" | "fit-page" | "custom"
+  >("fit-width");
   const [textMode, setTextMode] = useState(false);
   const [pageText, setPageText] = useState("");
   const [pageTextLoading, setPageTextLoading] = useState(false);
   const [customScale, setCustomScale] = useState(1.0);
   const [fullscreen, setFullscreen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [bookmarksLoading, setBookmarksLoading] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [bookmarkStatus, setBookmarkStatus] = useState<string | null>(null);
 
-  // Ctrl/Cmd+F opens the in-book search bar (current page only — pdf.js
+  // Ctrl/Cmd+F opens the in-book search bar (current page only; pdf.js
   // doesn't expose a way to text-search across un-rendered pages without
   // a heavier integration). Capture phase so WebView2's native find
   // toolbar doesn't get the event first.
@@ -135,7 +151,7 @@ export function PdfView({
     suffix: string;
   } | null>(null);
 
-  // Annotation state — paralleling EpubView
+  // Annotation state paralleling EpubView
   const [allHighlights, setAllHighlights] = useState<Highlight[]>([]);
   const [pendingSel, setPendingSel] = useState<PendingSelection | null>(null);
   const [activeHl, setActiveHl] = useState<ActiveHighlight | null>(null);
@@ -149,6 +165,7 @@ export function PdfView({
   const pageWrapRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
   const initialApplied = useRef(false);
+  const pendingInitialScroll = useRef<number | null>(initialScrollY ?? null);
 
   // Bank reading time while this view is open
   useReadTimeHeartbeat(bookId);
@@ -162,7 +179,9 @@ export function PdfView({
   }, [settings.theme]);
 
   useEffect(() => {
-    loadReaderSettings().then(setSettings).catch(() => {});
+    loadReaderSettings()
+      .then(setSettings)
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -171,6 +190,23 @@ export function PdfView({
     }, 200);
     return () => window.clearTimeout(t);
   }, [settings]);
+
+  async function refreshBookmarks() {
+    setBookmarksLoading(true);
+    try {
+      setBookmarks(await ipc.listBookmarksByBook(bookId));
+    } catch {
+      setBookmarks([]);
+    } finally {
+      setBookmarksLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    if (bookmarksOpen) {
+      refreshBookmarks();
+    }
+  }, [bookmarksOpen, bookId]);
 
   // Load all highlights for this book
   useEffect(() => {
@@ -198,14 +234,14 @@ export function PdfView({
   // pdf.js needs CMap tables for CJK PDFs that don't embed fonts, and
   // standard_fonts as a fallback. We copy these from pdfjs-dist into the
   // bundle via vite-plugin-static-copy and reference them here. Must be
-  // memoized — react-pdf reloads the document if `options` identity
+  // memoized; react-pdf reloads the document if `options` identity
   // changes.
   const pdfOptions = useMemo(
     () => ({
       cMapUrl: "/cmaps/",
       cMapPacked: true,
       standardFontDataUrl: "/standard_fonts/",
-      // Let pdf.js use Windows system CJK fonts (SimSun / 微软雅黑) as
+      // Let pdf.js use Windows system CJK fonts (SimSun / Microsoft YaHei) as
       // fallback when a PDF references non-embedded CJK fonts.
       useSystemFonts: true,
       // Some Chinese PDFs use very old encoding tricks; eval-based font
@@ -222,6 +258,7 @@ export function PdfView({
       const p = initialSpine + 1;
       setPageNum(p);
       setPageInput(String(p));
+      pendingInitialScroll.current = initialScrollY ?? 0;
       initialApplied.current = true;
       return;
     }
@@ -238,7 +275,18 @@ export function PdfView({
       .finally(() => {
         initialApplied.current = true;
       });
-  }, [bookId, initialSpine]);
+  }, [bookId, initialSpine, initialScrollY]);
+
+  useEffect(() => {
+    const y = pendingInitialScroll.current;
+    if (y == null || numPages === 0) return;
+    pendingInitialScroll.current = null;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        containerRef.current?.scrollTo({ top: Math.max(0, y) });
+      });
+    });
+  }, [numPages, pageNum]);
 
   // Save progress on page change
   useEffect(() => {
@@ -329,7 +377,7 @@ export function PdfView({
     if (displayMode !== "custom") {
       const cw = Math.max(320, containerSize.w - 64);
       const baseW = Math.min(1200, cw);
-      setCustomScale(Math.max(0.3, (width / baseW) / 1.1));
+      setCustomScale(Math.max(0.3, width / baseW / 1.1));
     } else {
       setCustomScale((s) => Math.max(0.3, s / 1.1));
     }
@@ -406,6 +454,55 @@ export function PdfView({
     else setPageInput(String(pageNum));
   }
 
+  async function addBookmark() {
+    const textLayerText =
+      pageWrapRef.current?.querySelector(".react-pdf__Page__textContent")
+        ?.textContent ?? "";
+    const label =
+      toc.find((t) => t.spine_index === pageNum - 1)?.label ??
+      `第 ${pageNum} 页`;
+    const excerpt = (textMode ? pageText : textLayerText).trim().slice(0, 120);
+    setBookmarkStatus("保存中...");
+    try {
+      await ipc.createBookmark({
+        bookId,
+        spineIndex: pageNum - 1,
+        scrollY: containerRef.current?.scrollTop ?? 0,
+        label,
+        excerpt,
+      });
+      if (bookmarksOpen) refreshBookmarks();
+      setBookmarkStatus("已加入书签");
+      window.setTimeout(() => setBookmarkStatus(null), 1600);
+    } catch (e) {
+      setBookmarkStatus(`书签保存失败：${String(e)}`);
+    }
+  }
+
+  function jumpToBookmark(bookmark: Bookmark) {
+    setBookmarksOpen(false);
+    goTo(bookmark.spine_index + 1);
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        containerRef.current?.scrollTo({
+          top: Math.max(0, bookmark.scroll_y),
+          behavior: "smooth",
+        });
+      });
+    });
+  }
+
+  async function deleteBookmark(bookmark: Bookmark) {
+    if (!window.confirm("删除这条书签？")) return;
+    try {
+      await ipc.deleteBookmark(bookmark.id);
+      setBookmarks((prev) => prev.filter((item) => item.id !== bookmark.id));
+    } catch (e) {
+      setBookmarkStatus(`书签删除失败：${String(e)}`);
+      window.setTimeout(() => setBookmarkStatus(null), 1800);
+    }
+  }
+
   // Keyboard nav
   useEffect(() => {
     function onKey(e: KeyboardEvent) {
@@ -428,7 +525,7 @@ export function PdfView({
   // direction, flip to the prev/next page. While scrolling within a
   // long page, wheel behaves normally.
   //
-  // Throttled to one flip per 350ms — without this, a long trackpad
+  // Throttled to one flip per 350ms; without this, a long trackpad
   // gesture would jump 5+ pages at once.
   useEffect(() => {
     const el = containerRef.current;
@@ -439,7 +536,7 @@ export function PdfView({
 
     function onWheel(e: WheelEvent) {
       if (!el) return;
-      // Ignore zoom (ctrl+wheel) — that's a future feature, don't hijack
+      // Ignore zoom (ctrl+wheel); that's a future feature, don't hijack
       if (e.ctrlKey) return;
       const dy = e.deltaY;
       if (Math.abs(dy) < 1) return;
@@ -625,7 +722,7 @@ export function PdfView({
     return () => document.removeEventListener("mousedown", onMouseDown);
   }, []);
 
-  // Click on a highlight rect → open popover. We detect clicks via
+  // Click on a highlight rect to open popover. We detect clicks via
   // hit-testing rather than putting pointer-events on the rects, so text
   // selection can still happen on top of marked passages.
   useEffect(() => {
@@ -727,8 +824,8 @@ export function PdfView({
 
   return (
     <div className="app-frame relative flex flex-col">
-      <header className="studio-header px-6 py-3.5 flex items-center justify-between gap-4">
-        <div className="min-w-0 flex-1">
+      <header className="studio-header reader-header flex items-center justify-between">
+        <div className="reader-header-title min-w-0">
           <h2 className="studio-title text-lg leading-tight truncate">
             {fileName}
           </h2>
@@ -736,93 +833,111 @@ export function PdfView({
             PDF
           </p>
         </div>
-        <div className="flex items-center gap-1.5 text-xs flex-shrink-0">
-          <button
-            onClick={() =>
-              setSettings((s) => ({
-                ...s,
-                toc_sidebar_open: !s.toc_sidebar_open,
-              }))
-            }
-            className={`studio-ghost ${
-              settings.toc_sidebar_open ? "studio-ghost-active" : ""
-            }`}
-          >
-            目录
-          </button>
-          <button
-            onClick={() => setAnnotationsOpen(true)}
-            className="studio-ghost"
-          >
-            标注{allHighlights.length > 0 ? ` · ${allHighlights.length}` : ""}
-          </button>
-          <button
-            onClick={() => setSearchOpen(true)}
-            className="studio-ghost"
-            title="本页内查找 (Ctrl+F)"
-          >
-            查找
-          </button>
-          <button
-            onClick={() => setChatOpen(true)}
-            className="studio-ghost"
-          >
-            问 AI
-          </button>
-          <button
-            onClick={() => {
-              const tl = pageWrapRef.current?.querySelector(
-                ".react-pdf__Page__textContent",
-              );
-              setMusicChapterText(textMode ? pageText : tl?.textContent ?? "");
-              setMusicSuggestOpen(true);
-            }}
-            className="studio-ghost"
-          >
-            AI 配乐
-          </button>
-          <button
-            onClick={() => goTo(pageNum - 1)}
-            disabled={pageNum <= 1}
-            aria-label="Previous page"
-            className="studio-icon-button disabled:opacity-25 disabled:cursor-not-allowed"
-          >
-            ←
-          </button>
-          <span className="flex items-center gap-1 tabular-nums">
-            <input
-              type="text"
-              inputMode="numeric"
-              value={pageInput}
-              onChange={(e) =>
-                setPageInput(e.target.value.replace(/[^\d]/g, ""))
+        <div className="reader-toolbar text-xs">
+          <div className="reader-toolbar-group">
+            <button
+              onClick={() =>
+                setSettings((s) => ({
+                  ...s,
+                  toc_sidebar_open: !s.toc_sidebar_open,
+                }))
               }
-              onBlur={commitPageInput}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") {
-                  commitPageInput();
-                  (e.target as HTMLInputElement).blur();
-                }
+              className={`studio-ghost ${
+                settings.toc_sidebar_open ? "studio-ghost-active" : ""
+              }`}
+            >
+              目录
+            </button>
+            <button
+              onClick={() => setAnnotationsOpen(true)}
+              className="studio-ghost"
+            >
+              标注{allHighlights.length > 0 ? ` · ${allHighlights.length}` : ""}
+            </button>
+            <button
+              onClick={addBookmark}
+              className="studio-ghost"
+              title="保存当前阅读位置"
+            >
+              书签
+            </button>
+            <button
+              onClick={() => setBookmarksOpen(true)}
+              className={`studio-ghost ${
+                bookmarksOpen ? "studio-ghost-active" : ""
+              }`}
+              title="查看当前书的书签"
+            >
+              书签列表{bookmarks.length > 0 ? ` · ${bookmarks.length}` : ""}
+            </button>
+            <button
+              onClick={() => setSearchOpen(true)}
+              className="studio-ghost"
+              title="本页内查找 (Ctrl+F)"
+            >
+              查找
+            </button>
+            <button onClick={() => setChatOpen(true)} className="studio-ghost">
+              问 AI
+            </button>
+            <button
+              onClick={() => {
+                const tl = pageWrapRef.current?.querySelector(
+                  ".react-pdf__Page__textContent",
+                );
+                setMusicChapterText(
+                  textMode ? pageText : (tl?.textContent ?? ""),
+                );
+                setMusicSuggestOpen(true);
               }}
-              className="w-12 px-1 text-center bg-transparent border-b border-[var(--color-paper-edge)] focus:outline-none focus:border-[var(--color-ink)]/40"
-            />
-            / {numPages || "—"}
-          </span>
-          <button
-            onClick={() => goTo(pageNum + 1)}
-            disabled={pageNum >= numPages}
-            aria-label="Next page"
-            className="studio-icon-button disabled:opacity-25 disabled:cursor-not-allowed"
-          >
-            →
-          </button>
-
-          {/* Display controls: zoom out / % / zoom in / fit modes / fullscreen */}
-          <div className="flex items-center gap-1 ml-2 pl-2 border-l border-[var(--color-paper-edge)]">
+              className="studio-ghost"
+            >
+              AI 配乐
+            </button>
+          </div>
+          <div className="reader-toolbar-group">
+            <button
+              onClick={() => goTo(pageNum - 1)}
+              disabled={pageNum <= 1}
+              aria-label="上一页"
+              className="studio-icon-button disabled:opacity-25 disabled:cursor-not-allowed"
+            >
+              ↑
+            </button>
+            <span className="studio-chip reader-page-control tabular-nums">
+              第
+              <input
+                type="text"
+                inputMode="numeric"
+                value={pageInput}
+                onChange={(e) =>
+                  setPageInput(e.target.value.replace(/[^\d]/g, ""))
+                }
+                onBlur={commitPageInput}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") {
+                    commitPageInput();
+                    (e.target as HTMLInputElement).blur();
+                  }
+                }}
+                className="reader-page-input mx-1 tabular-nums"
+              />
+              / {numPages || "-"} 页
+            </span>
+            <button
+              onClick={() => goTo(pageNum + 1)}
+              disabled={pageNum >= numPages}
+              aria-label="下一页"
+              className="studio-icon-button disabled:opacity-25 disabled:cursor-not-allowed"
+            >
+              ↓
+            </button>
+          </div>
+          <div className="reader-toolbar-group">
             <button
               onClick={() => setTextMode((v) => !v)}
               className={`studio-ghost ${textMode ? "studio-ghost-active" : ""}`}
-              title="切换 PDF 文本模式，让字体设置生效"
+              title="切换 PDF 文本模式"
             >
               文本
             </button>
@@ -835,7 +950,7 @@ export function PdfView({
               −
             </button>
             <span className="tabular-nums text-[10px] min-w-[3em] text-center">
-              {actualScalePct != null ? `${actualScalePct}%` : "—"}
+              {actualScalePct != null ? `${actualScalePct}%` : "-"}
             </span>
             <button
               onClick={zoomIn}
@@ -851,9 +966,7 @@ export function PdfView({
                 setCustomScale(1.0);
               }}
               className={`studio-ghost ${
-                displayMode === "fit-width"
-                  ? "studio-ghost-active"
-                  : ""
+                displayMode === "fit-width" ? "studio-ghost-active" : ""
               }`}
               title="按宽度适应"
             >
@@ -865,41 +978,39 @@ export function PdfView({
                 setCustomScale(1.0);
               }}
               className={`studio-ghost ${
-                displayMode === "fit-page"
-                  ? "studio-ghost-active"
-                  : ""
+                displayMode === "fit-page" ? "studio-ghost-active" : ""
               }`}
               title="整页适应"
             >
               整页
             </button>
+          </div>
+          <div className="reader-toolbar-group">
             <button
               onClick={toggleFullscreen}
-              className={`studio-ghost ${
-                fullscreen
-                  ? "studio-ghost-active"
-                  : ""
-              }`}
+              className={`studio-ghost ${fullscreen ? "studio-ghost-active" : ""}`}
               title={fullscreen ? "退出全屏" : "全屏 (F11)"}
             >
               {fullscreen ? "退出全屏" : "全屏"}
             </button>
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="studio-ghost"
+            >
+              设置
+            </button>
+            <button onClick={onBack} className="studio-button">
+              {backLabel}
+            </button>
           </div>
-
-          <button
-            onClick={() => setSettingsOpen(true)}
-            className="studio-ghost ml-2"
-          >
-            设置
-          </button>
-          <button
-            onClick={onBack}
-            className="studio-button"
-          >
-            {backLabel}
-          </button>
         </div>
       </header>
+
+      {bookmarkStatus && (
+        <div className="absolute right-6 top-20 z-40 rounded border border-[var(--color-paper-edge)] bg-[var(--color-paper)] px-3 py-2 text-xs text-[var(--color-accent)] shadow-sm">
+          {bookmarkStatus}
+        </div>
+      )}
 
       <div className="flex-1 flex overflow-hidden">
         {settings.toc_sidebar_open && (
@@ -913,13 +1024,23 @@ export function PdfView({
             }
           />
         )}
+        {bookmarksOpen && (
+          <BookmarksPanel
+            bookmarks={bookmarks}
+            toc={toc}
+            loading={bookmarksLoading}
+            onJump={jumpToBookmark}
+            onDelete={deleteBookmark}
+            onClose={() => setBookmarksOpen(false)}
+          />
+        )}
         <div
           ref={containerRef}
           className="reader-page flex-1 overflow-auto flex flex-col items-center py-8 px-4"
         >
           {loading && (
             <div className="text-sm text-[var(--color-muted)] mt-12 tracking-widest">
-              加载 PDF…
+              加载 PDF...
             </div>
           )}
           {error && (
@@ -942,7 +1063,9 @@ export function PdfView({
                 }`}
                 style={readingStyle}
               >
-                {pageTextLoading ? "正在解析本页文本..." : pageText || "这一页没有可提取的文本。"}
+                {pageTextLoading
+                  ? "正在解析本页文本..."
+                  : pageText || "这一页没有可提取的文本。"}
               </article>
             )}
             {numPages > 0 && !textMode && (
@@ -965,7 +1088,7 @@ export function PdfView({
                   }}
                   onRenderSuccess={() => waitForTextLayerAndApply()}
                 />
-                {/* Highlight overlays — pointer-events: none so text selection
+                {/* Highlight overlays: pointer-events none so text selection
                     works through them. Clicks are handled via hit-testing
                     on the wrapping div (see useEffect). */}
                 {highlightRects.map((r, i) => (
@@ -988,7 +1111,7 @@ export function PdfView({
         </div>
       </div>
 
-      {/* Page progress strip — same pattern as EpubView's chapter strip. */}
+      {/* Page progress strip matching EpubView's chapter strip. */}
       {numPages > 0 && (
         <div className="flex-shrink-0 px-6 py-1.5 border-t border-[var(--color-paper-edge)] bg-[var(--color-paper-soft)]/60 flex items-center gap-3">
           <span className="text-[10px] studio-subtle tracking-[0.1em] tabular-nums">
@@ -1047,7 +1170,7 @@ export function PdfView({
             className="px-2 py-0.5 rounded-full text-xs hover:bg-white/15 transition"
             title="问 AI 这段是什么意思"
           >
-            ✦ 问 AI
+            问 AI
           </button>
         </div>
       )}
@@ -1067,9 +1190,7 @@ export function PdfView({
           spineIndex={lookupSel.spineIdx}
           prefix={lookupSel.prefix}
           suffix={lookupSel.suffix}
-          onHighlightCreated={(hl) =>
-            setAllHighlights((prev) => [...prev, hl])
-          }
+          onHighlightCreated={(hl) => setAllHighlights((prev) => [...prev, hl])}
           aiConfigured={true}
           onOpenSettings={() => setLookupSel(null)}
           onClose={() => setLookupSel(null)}
@@ -1121,9 +1242,9 @@ export function PdfView({
           chapterText={
             textMode
               ? pageText
-              : pageWrapRef.current?.querySelector(
+              : (pageWrapRef.current?.querySelector(
                   ".react-pdf__Page__textContent",
-                )?.textContent ?? ""
+                )?.textContent ?? "")
           }
           aiConfigured={
             aiSettings.base_url.trim() !== "" &&

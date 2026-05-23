@@ -7,7 +7,12 @@ import { MusicView } from "@/features/music/MusicView";
 import { MusicMiniPlayer } from "@/features/music/MusicMiniPlayer";
 import { MusicPlayerProvider } from "@/features/music/MusicPlayerContext";
 import { StatsView } from "@/features/stats/StatsView";
-import { DEFAULT_AI_SETTINGS, loadAiSettings, saveAiSettings } from "@/lib/ipc";
+import {
+  DEFAULT_AI_SETTINGS,
+  ipc,
+  loadAiSettings,
+  saveAiSettings,
+} from "@/lib/ipc";
 import { GlobalAiSettingsPanel } from "@/features/settings/GlobalAiSettingsPanel";
 import type { AiSettings, Book } from "@/lib/ipc";
 
@@ -20,6 +25,7 @@ type View =
       kind: "reader";
       book: Book;
       initialSpine?: number;
+      initialScrollY?: number;
       initialHighlight?: number;
       returnTo: "library" | "notes" | "stats";
     };
@@ -36,18 +42,27 @@ function App() {
 function AppShell() {
   const [view, setView] = useState<View>({ kind: "library" });
   const [aiSettings, setAiSettings] = useState<AiSettings>(DEFAULT_AI_SETTINGS);
+  const [aiSettingsLoaded, setAiSettingsLoaded] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
 
   useEffect(() => {
-    loadAiSettings().then(setAiSettings).catch(() => {});
+    loadAiSettings()
+      .then(setAiSettings)
+      .catch(() => {})
+      .finally(() => setAiSettingsLoaded(true));
   }, []);
 
   useEffect(() => {
+    ipc.refreshDoubanMetadata(false).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    if (!aiSettingsLoaded) return;
     const t = window.setTimeout(() => {
       saveAiSettings(aiSettings).catch(() => {});
     }, 300);
     return () => window.clearTimeout(t);
-  }, [aiSettings]);
+  }, [aiSettings, aiSettingsLoaded]);
 
   const globalSettingsPanel = aiSettingsOpen ? (
     <GlobalAiSettingsPanel
@@ -75,6 +90,7 @@ function AppShell() {
             aiSettings={aiSettings}
             onOpenAiSettings={() => setAiSettingsOpen(true)}
             initialSpine={view.initialSpine}
+            initialScrollY={view.initialScrollY}
             initialHighlightId={view.initialHighlight}
             backLabel={backLabel}
             onBack={onBack}
@@ -92,6 +108,7 @@ function AppShell() {
           aiSettings={aiSettings}
           onOpenAiSettings={() => setAiSettingsOpen(true)}
           initialSpine={view.initialSpine}
+          initialScrollY={view.initialScrollY}
           initialHighlightId={view.initialHighlight}
           backLabel={backLabel}
           onBack={onBack}
@@ -140,8 +157,14 @@ function AppShell() {
   return (
     <>
       <LibraryView
-        onOpenBook={(book) =>
-          setView({ kind: "reader", book, returnTo: "library" })
+        onOpenBook={(book, initialSpine, initialScrollY) =>
+          setView({
+            kind: "reader",
+            book,
+            initialSpine,
+            initialScrollY,
+            returnTo: "library",
+          })
         }
         onOpenNotes={() => setView({ kind: "notes" })}
         onOpenMusic={() => setView({ kind: "music" })}

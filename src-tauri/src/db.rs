@@ -23,6 +23,19 @@ CREATE TABLE IF NOT EXISTS reading_progress (
     updated_at INTEGER NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS bookmarks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    spine_index INTEGER NOT NULL DEFAULT 0,
+    scroll_y REAL NOT NULL DEFAULT 0,
+    label TEXT NOT NULL,
+    excerpt TEXT NOT NULL DEFAULT '',
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_bookmarks_book ON bookmarks(book_id);
+CREATE INDEX IF NOT EXISTS idx_bookmarks_created ON bookmarks(created_at DESC);
+
 CREATE TABLE IF NOT EXISTS app_config (
     key TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -64,6 +77,20 @@ CREATE TABLE IF NOT EXISTS book_index_status (
     indexed_at INTEGER,
     error TEXT
 );
+
+CREATE TABLE IF NOT EXISTS douban_book_metadata (
+    book_id INTEGER PRIMARY KEY REFERENCES books(id) ON DELETE CASCADE,
+    status TEXT NOT NULL DEFAULT 'pending',
+    rating TEXT,
+    rating_count INTEGER,
+    summary TEXT,
+    douban_url TEXT,
+    fetched_at INTEGER NOT NULL,
+    error TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_douban_book_metadata_status
+  ON douban_book_metadata(status, fetched_at);
 
 CREATE TABLE IF NOT EXISTS track_tags (
     track_path TEXT PRIMARY KEY,
@@ -156,6 +183,7 @@ pub fn upsert_book(conn: &Connection, b: &Book) -> rusqlite::Result<()> {
         "INSERT INTO books (file_path, format, title, author, added_at, file_size, file_modified)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
          ON CONFLICT(file_path) DO UPDATE SET
+            format = excluded.format,
             title = excluded.title,
             author = excluded.author,
             file_size = excluded.file_size,
@@ -230,11 +258,7 @@ pub fn get_book_by_path(conn: &Connection, path: &str) -> rusqlite::Result<Optio
     .optional()
 }
 
-pub fn add_read_time(
-    conn: &Connection,
-    book_id: i64,
-    delta_ms: i64,
-) -> rusqlite::Result<()> {
+pub fn add_read_time(conn: &Connection, book_id: i64, delta_ms: i64) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE books SET read_time_ms = read_time_ms + ?1 WHERE id = ?2",
         params![delta_ms, book_id],
@@ -242,11 +266,7 @@ pub fn add_read_time(
     Ok(())
 }
 
-pub fn set_book_category(
-    conn: &Connection,
-    book_id: i64,
-    category: &str,
-) -> rusqlite::Result<()> {
+pub fn set_book_category(conn: &Connection, book_id: i64, category: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE books SET category = ?1 WHERE id = ?2",
         params![category, book_id],
@@ -266,10 +286,7 @@ pub fn set_book_cover_by_path(
     Ok(())
 }
 
-pub fn get_book_cover_path(
-    conn: &Connection,
-    file_path: &str,
-) -> rusqlite::Result<Option<String>> {
+pub fn get_book_cover_path(conn: &Connection, file_path: &str) -> rusqlite::Result<Option<String>> {
     conn.query_row(
         "SELECT cover_path FROM books WHERE file_path = ?1",
         params![file_path],
@@ -277,6 +294,106 @@ pub fn get_book_cover_path(
     )
     .optional()
     .map(|opt| opt.flatten())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DoubanMetadata {
+    pub book_id: i64,
+    pub status: String,
+    pub rating: Option<String>,
+    pub rating_count: Option<i64>,
+    pub summary: Option<String>,
+    pub douban_url: Option<String>,
+    pub fetched_at: i64,
+    pub error: Option<String>,
+}
+
+pub fn get_douban_metadata(
+    conn: &Connection,
+    book_id: i64,
+) -> rusqlite::Result<Option<DoubanMetadata>> {
+    conn.query_row(
+        "SELECT book_id, status, rating, rating_count, summary, douban_url, fetched_at, error
+         FROM douban_book_metadata
+         WHERE book_id = ?1",
+        params![book_id],
+        |row| {
+            Ok(DoubanMetadata {
+                book_id: row.get(0)?,
+                status: row.get(1)?,
+                rating: row.get(2)?,
+                rating_count: row.get(3)?,
+                summary: row.get(4)?,
+                douban_url: row.get(5)?,
+                fetched_at: row.get(6)?,
+                error: row.get(7)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn upsert_douban_metadata(
+    conn: &Connection,
+    metadata: &DoubanMetadata,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO douban_book_metadata
+            (book_id, status, rating, rating_count, summary, douban_url, fetched_at, error)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+         ON CONFLICT(book_id) DO UPDATE SET
+            status = excluded.status,
+            rating = excluded.rating,
+            rating_count = excluded.rating_count,
+            summary = excluded.summary,
+            douban_url = excluded.douban_url,
+            fetched_at = excluded.fetched_at,
+            error = excluded.error",
+        params![
+            metadata.book_id,
+            metadata.status,
+            metadata.rating,
+            metadata.rating_count,
+            metadata.summary,
+            metadata.douban_url,
+            metadata.fetched_at,
+            metadata.error
+        ],
+    )?;
+    Ok(())
+}
+
+pub fn list_books_for_douban_refresh(
+    conn: &Connection,
+    force: bool,
+) -> rusqlite::Result<Vec<Book>> {
+    let mut stmt = conn.prepare(
+        "SELECT b.id, b.file_path, b.format, b.title, b.author, b.added_at,
+                b.file_size, b.file_modified, b.category, p.updated_at,
+                b.cover_path, b.read_time_ms
+         FROM books b
+         LEFT JOIN reading_progress p ON p.book_id = b.id
+         LEFT JOIN douban_book_metadata dm ON dm.book_id = b.id
+         WHERE ?1 OR dm.book_id IS NULL
+         ORDER BY b.added_at DESC, b.title ASC",
+    )?;
+    let rows = stmt.query_map(params![force], |row| {
+        Ok(Book {
+            id: row.get(0)?,
+            file_path: row.get(1)?,
+            format: row.get(2)?,
+            title: row.get(3)?,
+            author: row.get(4)?,
+            added_at: row.get(5)?,
+            file_size: row.get(6)?,
+            file_modified: row.get(7)?,
+            category: row.get(8)?,
+            last_read_at: row.get(9)?,
+            cover_path: row.get(10)?,
+            read_time_ms: row.get(11)?,
+        })
+    })?;
+    rows.collect()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -320,6 +437,105 @@ pub fn save_progress(
             updated_at = excluded.updated_at",
         params![book_id, spine_index, scroll_y, updated_at],
     )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct Bookmark {
+    pub id: i64,
+    pub book_id: i64,
+    pub spine_index: i64,
+    pub scroll_y: f64,
+    pub label: String,
+    pub excerpt: String,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BookmarkWithBook {
+    pub id: i64,
+    pub book_id: i64,
+    pub spine_index: i64,
+    pub scroll_y: f64,
+    pub label: String,
+    pub excerpt: String,
+    pub created_at: i64,
+    pub book_title: String,
+    pub book_author: String,
+    pub book_format: String,
+    pub book_path: String,
+}
+
+pub fn create_bookmark(
+    conn: &Connection,
+    book_id: i64,
+    spine_index: i64,
+    scroll_y: f64,
+    label: &str,
+    excerpt: &str,
+    now_ms: i64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO bookmarks (book_id, spine_index, scroll_y, label, excerpt, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![book_id, spine_index, scroll_y, label, excerpt, now_ms],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list_recent_bookmarks(
+    conn: &Connection,
+    limit: i64,
+) -> rusqlite::Result<Vec<BookmarkWithBook>> {
+    let mut stmt = conn.prepare(
+        "SELECT bm.id, bm.book_id, bm.spine_index, bm.scroll_y, bm.label,
+                bm.excerpt, bm.created_at, b.title, b.author, b.format, b.file_path
+         FROM bookmarks bm
+         JOIN books b ON b.id = bm.book_id
+         ORDER BY bm.created_at DESC, bm.id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map(params![limit], |row| {
+        Ok(BookmarkWithBook {
+            id: row.get(0)?,
+            book_id: row.get(1)?,
+            spine_index: row.get(2)?,
+            scroll_y: row.get(3)?,
+            label: row.get(4)?,
+            excerpt: row.get(5)?,
+            created_at: row.get(6)?,
+            book_title: row.get(7)?,
+            book_author: row.get(8)?,
+            book_format: row.get(9)?,
+            book_path: row.get(10)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn list_bookmarks_by_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<Bookmark>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, book_id, spine_index, scroll_y, label, excerpt, created_at
+         FROM bookmarks
+         WHERE book_id = ?1
+         ORDER BY spine_index ASC, scroll_y ASC, created_at DESC, id DESC",
+    )?;
+    let rows = stmt.query_map(params![book_id], |row| {
+        Ok(Bookmark {
+            id: row.get(0)?,
+            book_id: row.get(1)?,
+            spine_index: row.get(2)?,
+            scroll_y: row.get(3)?,
+            label: row.get(4)?,
+            excerpt: row.get(5)?,
+            created_at: row.get(6)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_bookmark(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM bookmarks WHERE id = ?1", params![id])?;
     Ok(())
 }
 
@@ -594,10 +810,7 @@ pub struct TrackTagWithEmbedding {
     pub embedding: Vec<u8>,
 }
 
-pub fn get_track_tag(
-    conn: &Connection,
-    track_path: &str,
-) -> rusqlite::Result<Option<TrackTag>> {
+pub fn get_track_tag(conn: &Connection, track_path: &str) -> rusqlite::Result<Option<TrackTag>> {
     conn.query_row(
         "SELECT track_path, file_mtime, mood_tags, description, tagged_at
          FROM track_tags WHERE track_path = ?1",
@@ -646,9 +859,7 @@ pub fn upsert_track_tag(
     Ok(())
 }
 
-pub fn list_all_track_tags(
-    conn: &Connection,
-) -> rusqlite::Result<Vec<TrackTagWithEmbedding>> {
+pub fn list_all_track_tags(conn: &Connection) -> rusqlite::Result<Vec<TrackTagWithEmbedding>> {
     let mut rows = Vec::new();
     let mut stmt = conn.prepare(
         "SELECT track_path, file_mtime, mood_tags, description, embedding FROM track_tags",
@@ -751,10 +962,7 @@ pub fn list_track_tag_meta(conn: &Connection) -> rusqlite::Result<Vec<TrackTag>>
 
 /// Load chunks for one or all indexed books. If `book_id` is Some, scopes
 /// to that book; if None, returns chunks from every book in the library.
-pub fn list_chunks(
-    conn: &Connection,
-    book_id: Option<i64>,
-) -> rusqlite::Result<Vec<ChunkRow>> {
+pub fn list_chunks(conn: &Connection, book_id: Option<i64>) -> rusqlite::Result<Vec<ChunkRow>> {
     let mut rows = Vec::new();
     if let Some(bid) = book_id {
         let mut stmt = conn.prepare(
@@ -774,9 +982,8 @@ pub fn list_chunks(
             rows.push(c?);
         }
     } else {
-        let mut stmt = conn.prepare(
-            "SELECT id, book_id, spine_index, text, embedding FROM book_chunks",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, book_id, spine_index, text, embedding FROM book_chunks")?;
         let iter = stmt.query_map([], |r| {
             Ok(ChunkRow {
                 id: r.get(0)?,

@@ -43,13 +43,8 @@ pub fn scan(
             continue;
         };
 
-        let format = match ext.to_ascii_lowercase().as_str() {
-            "epub" => "epub",
-            "txt" => "txt",
-            "pdf" => "pdf",
-            "docx" => "docx",
-            "mobi" => "mobi",
-            _ => continue,
+        let Some(format) = format_for_extension(ext) else {
+            continue;
         };
 
         // Get file metadata once (need size for filtering anyway)
@@ -80,12 +75,10 @@ pub fn scan(
             .unwrap_or((0, 0));
 
         let (title, author) = match format {
-            "epub" => extract_epub_metadata(path).unwrap_or_else(|_| {
-                (file_stem_or(path, "Untitled"), "Unknown".to_string())
-            }),
-            "mobi" => extract_mobi_metadata(path).unwrap_or_else(|_| {
-                (file_stem_or(path, "Untitled"), "Unknown".to_string())
-            }),
+            "epub" => extract_epub_metadata(path)
+                .unwrap_or_else(|_| (file_stem_or(path, "Untitled"), "Unknown".to_string())),
+            "mobi" | "azw" | "azw3" => extract_mobi_metadata(path)
+                .unwrap_or_else(|_| (file_stem_or(path, "Untitled"), "Unknown".to_string())),
             _ => (file_stem_or(path, "Untitled"), "Unknown".to_string()),
         };
 
@@ -135,10 +128,7 @@ pub fn scan(
     })
 }
 
-fn prune_missing_books(
-    conn: &Connection,
-    visited: &HashSet<String>,
-) -> rusqlite::Result<usize> {
+fn prune_missing_books(conn: &Connection, visited: &HashSet<String>) -> rusqlite::Result<usize> {
     let mut existing: Vec<String> = Vec::new();
     {
         let mut stmt = conn.prepare("SELECT file_path FROM books")?;
@@ -155,6 +145,19 @@ fn prune_missing_books(
         }
     }
     Ok(removed)
+}
+
+fn format_for_extension(ext: &str) -> Option<&'static str> {
+    match ext.to_ascii_lowercase().as_str() {
+        "epub" => Some("epub"),
+        "txt" => Some("txt"),
+        "pdf" => Some("pdf"),
+        "docx" => Some("docx"),
+        "mobi" => Some("mobi"),
+        "azw" => Some("azw"),
+        "azw3" => Some("azw3"),
+        _ => None,
+    }
 }
 
 fn maybe_cache_epub_cover(
@@ -196,12 +199,8 @@ fn maybe_cache_epub_cover(
     };
     let cover_path: PathBuf = covers_dir.join(format!("{hash}.{ext}"));
     std::fs::write(&cover_path, &bytes).map_err(|e| e.to_string())?;
-    set_book_cover_by_path(
-        conn,
-        book_file_path,
-        &cover_path.to_string_lossy(),
-    )
-    .map_err(|e| e.to_string())?;
+    set_book_cover_by_path(conn, book_file_path, &cover_path.to_string_lossy())
+        .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -223,10 +222,7 @@ fn looks_like_a_book(path: &Path, format: &str, size: u64) -> bool {
             if s.starts_with('.') && s != "." && s != ".." {
                 return false;
             }
-            if matches!(
-                s,
-                "__MACOSX" | "$RECYCLE.BIN" | "System Volume Information"
-            ) {
+            if matches!(s, "__MACOSX" | "$RECYCLE.BIN" | "System Volume Information") {
                 return false;
             }
         }
@@ -234,8 +230,8 @@ fn looks_like_a_book(path: &Path, format: &str, size: u64) -> bool {
 
     // Size floor by format. Real books are very rarely tinier than this.
     let min_size: u64 = match format {
-        "txt" => 3 * 1024,    // 3 KB
-        "epub" | "docx" | "mobi" => 10 * 1024,
+        "txt" => 3 * 1024, // 3 KB
+        "epub" | "docx" | "mobi" | "azw" | "azw3" => 10 * 1024,
         "pdf" => 30 * 1024,
         _ => 0,
     };
@@ -284,4 +280,16 @@ fn looks_like_a_book(path: &Path, format: &str, size: u64) -> bool {
     }
 
     true
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_for_extension_keeps_azw_distinct_from_mobi() {
+        assert_eq!(format_for_extension("mobi"), Some("mobi"));
+        assert_eq!(format_for_extension("azw"), Some("azw"));
+        assert_eq!(format_for_extension("azw3"), Some("azw3"));
+    }
 }

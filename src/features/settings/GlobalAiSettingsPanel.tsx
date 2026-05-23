@@ -1,5 +1,5 @@
-import type { ReactNode } from "react";
-import type { AiSettings } from "@/lib/ipc";
+import { useState, type ReactNode } from "react";
+import { ipc, type AiSettings } from "@/lib/ipc";
 
 type Props = {
   settings: AiSettings;
@@ -9,7 +9,7 @@ type Props = {
 
 const AI_PRESETS: { label: string; base_url: string; model: string }[] = [
   { label: "OpenAI", base_url: "https://api.openai.com", model: "gpt-4o-mini" },
-  { label: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-chat" },
+  { label: "DeepSeek", base_url: "https://api.deepseek.com", model: "deepseek-v4-pro" },
   { label: "Moonshot", base_url: "https://api.moonshot.cn", model: "moonshot-v1-8k" },
   { label: "智谱", base_url: "https://open.bigmodel.cn/api/paas", model: "glm-4-flash" },
   { label: "Claude", base_url: "https://api.anthropic.com", model: "claude-3-5-sonnet-latest" },
@@ -20,8 +20,38 @@ export function GlobalAiSettingsPanel({
   onChange,
   onClose,
 }: Props) {
+  const [testState, setTestState] = useState<
+    "idle" | "testing" | "success" | "error"
+  >("idle");
+  const [testMessage, setTestMessage] = useState("");
+
   function update<K extends keyof AiSettings>(key: K, value: AiSettings[K]) {
     onChange({ ...settings, [key]: value });
+    setTestState("idle");
+    setTestMessage("");
+  }
+
+  function applyPreset(preset: { base_url: string; model: string }) {
+    onChange({
+      ...settings,
+      base_url: preset.base_url,
+      chat_model: preset.model,
+    });
+    setTestState("idle");
+    setTestMessage("");
+  }
+
+  async function testModel() {
+    setTestState("testing");
+    setTestMessage("");
+    try {
+      const msg = await ipc.testAiModel(settings);
+      setTestState("success");
+      setTestMessage(msg);
+    } catch (e) {
+      setTestState("error");
+      setTestMessage(String(e));
+    }
   }
 
   return (
@@ -49,13 +79,7 @@ export function GlobalAiSettingsPanel({
               {AI_PRESETS.map((preset) => (
                 <button
                   key={preset.label}
-                  onClick={() =>
-                    onChange({
-                      ...settings,
-                      base_url: preset.base_url,
-                      chat_model: settings.chat_model || preset.model,
-                    })
-                  }
+                  onClick={() => applyPreset(preset)}
                   className={`studio-segment text-left ${
                     settings.base_url === preset.base_url
                       ? "studio-segment-active"
@@ -93,7 +117,7 @@ export function GlobalAiSettingsPanel({
               type="text"
               value={settings.chat_model}
               onChange={(e) => update("chat_model", e.target.value)}
-              placeholder="gpt-4o-mini / deepseek-chat"
+              placeholder="gpt-4o-mini / deepseek-v4-pro"
               className="studio-input w-full text-xs font-mono"
             />
           </SettingBlock>
@@ -109,11 +133,33 @@ export function GlobalAiSettingsPanel({
               <span className="text-xs leading-relaxed">
                 <span className="text-[var(--color-ink)]">关闭思考链</span>
                 <span className="block studio-subtle mt-0.5">
-                  适合阅读问答、分类、推荐等日常场景，通常响应更快。
+                  适合阅读问答、分类、推荐等日常场景；仅对 DeepSeek/Qwen
+                  等支持该字段的接口发送。
                 </span>
               </span>
             </label>
           </SettingBlock>
+
+          <div className="pt-2">
+            <button
+              onClick={testModel}
+              disabled={testState === "testing"}
+              className="studio-button w-full disabled:opacity-50 disabled:cursor-wait"
+            >
+              {testState === "testing" ? "测试中..." : "测试模型连接"}
+            </button>
+            {testMessage && (
+              <p
+                className={`mt-2 text-xs leading-relaxed whitespace-pre-wrap ${
+                  testState === "success"
+                    ? "text-[var(--color-accent)]"
+                    : "text-red-600"
+                }`}
+              >
+                {testMessage}
+              </p>
+            )}
+          </div>
         </div>
       </aside>
     </div>

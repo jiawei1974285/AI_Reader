@@ -47,8 +47,8 @@ pub struct EpubPreview {
 /// cover SVG pages, nav documents, and TOC-like pages.
 #[tauri::command]
 pub fn read_epub_preview(path: String) -> Result<EpubPreview, String> {
-    let mut doc = EpubDoc::new(Path::new(&path))
-        .map_err(|e| format!("Failed to open EPUB: {e}"))?;
+    let mut doc =
+        EpubDoc::new(Path::new(&path)).map_err(|e| format!("Failed to open EPUB: {e}"))?;
 
     let title = doc.get_title().unwrap_or_else(|| "Untitled".to_string());
     let author = doc
@@ -84,15 +84,23 @@ pub fn read_epub_preview(path: String) -> Result<EpubPreview, String> {
         break;
     }
 
-    build_preview(&mut doc, title, author, chosen_index, spine_total, chosen_raw, &chosen_idref)
+    build_preview(
+        &mut doc,
+        title,
+        author,
+        chosen_index,
+        spine_total,
+        chosen_raw,
+        &chosen_idref,
+    )
 }
 
 /// Open a specific spine item by index. Used for prev/next navigation and
 /// for restoring saved reading progress.
 #[tauri::command]
 pub fn read_epub_chapter(path: String, spine_index: usize) -> Result<EpubPreview, String> {
-    let mut doc = EpubDoc::new(Path::new(&path))
-        .map_err(|e| format!("Failed to open EPUB: {e}"))?;
+    let mut doc =
+        EpubDoc::new(Path::new(&path)).map_err(|e| format!("Failed to open EPUB: {e}"))?;
 
     let title = doc.get_title().unwrap_or_else(|| "Untitled".to_string());
     let author = doc
@@ -114,7 +122,15 @@ pub fn read_epub_chapter(path: String, spine_index: usize) -> Result<EpubPreview
         .map(|(c, _)| c)
         .unwrap_or_default();
 
-    build_preview(&mut doc, title, author, spine_index, spine_total, raw, &idref)
+    build_preview(
+        &mut doc,
+        title,
+        author,
+        spine_index,
+        spine_total,
+        raw,
+        &idref,
+    )
 }
 
 #[derive(Serialize, Clone)]
@@ -132,8 +148,8 @@ pub struct TocEntry {
 /// the spine and harvesting `<h1>/<h2>/<h3>` headings as chapter labels.
 #[tauri::command]
 pub fn get_book_toc(path: String) -> Result<Vec<TocEntry>, String> {
-    let mut doc = EpubDoc::new(Path::new(&path))
-        .map_err(|e| format!("Failed to open EPUB: {e}"))?;
+    let mut doc =
+        EpubDoc::new(Path::new(&path)).map_err(|e| format!("Failed to open EPUB: {e}"))?;
 
     let mut path_to_idx: HashMap<PathBuf, usize> = HashMap::new();
     for (idx, item) in doc.spine.iter().enumerate() {
@@ -160,8 +176,8 @@ pub fn get_book_toc(path: String) -> Result<Vec<TocEntry>, String> {
             if visible_char_count(&stripped) < 30 {
                 continue;
             }
-            let label = extract_chapter_label(&stripped)
-                .unwrap_or_else(|| format!("第 {} 节", idx + 1));
+            let label =
+                extract_chapter_label(&stripped).unwrap_or_else(|| format!("第 {} 节", idx + 1));
             entries.push(TocEntry {
                 spine_index: idx,
                 label,
@@ -173,9 +189,8 @@ pub fn get_book_toc(path: String) -> Result<Vec<TocEntry>, String> {
     Ok(entries)
 }
 
-static HEADING_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?is)<h[1-6][^>]*>(.*?)</h[1-6]\s*>").unwrap()
-});
+static HEADING_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<h[1-6][^>]*>(.*?)</h[1-6]\s*>").unwrap());
 
 /// Try to find a chapter label inside an HTML fragment. Prefers headings;
 /// falls back to the first ~30 visible characters.
@@ -284,10 +299,11 @@ fn build_preview(
     })
 }
 
-static IMG_SRC_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // Matches <img ... src="path" ...> and captures the src value.
-    // Permissive on attribute order, single/double quotes, and self-close.
-    Regex::new(r#"(?is)<img\b([^>]*?)\bsrc\s*=\s*["']([^"']+)["']([^>]*?)/?>"#).unwrap()
+static RESOURCE_REF_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Matches <img src="..."> and SVG <image href="..."> / <image xlink:href="...">.
+    // Many illustrated EPUBs put page images inside SVG wrappers, so handling
+    // <img> alone drops the artwork during strip_visual().
+    Regex::new(r#"(?is)<(?:img|image)\b([^>]*?)\b(?:src|href|xlink:href)\s*=\s*["']([^"']+)["']([^>]*?)/?>"#).unwrap()
 });
 
 /// Walk every <img> in the chapter HTML, try to resolve its src against the
@@ -302,19 +318,29 @@ fn inline_images(
     chapter_idref: &str,
     html: &str,
 ) -> String {
-    let Some(chapter_path) = doc
-        .resources
-        .get(chapter_idref)
-        .map(|r| r.path.clone())
-    else {
+    let Some(chapter_path) = doc.resources.get(chapter_idref).map(|r| r.path.clone()) else {
         return html.to_string();
     };
-    let chapter_dir = chapter_path.parent().map(Path::to_path_buf).unwrap_or_default();
+    let chapter_dir = chapter_path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
 
-    // Pre-collect matches so we can mutate `doc` inside the replacement
-    // loop (replace_all's closure can't borrow doc mutably).
+    inline_resource_refs(html, &chapter_dir, |resolved| {
+        let bytes = doc.get_resource_by_path(resolved)?;
+        let mime = doc
+            .get_resource_mime_by_path(resolved)
+            .unwrap_or_else(|| guess_mime_from_ext(resolved));
+        Some((bytes, mime))
+    })
+}
+
+fn inline_resource_refs<F>(html: &str, chapter_dir: &Path, mut load: F) -> String
+where
+    F: FnMut(&Path) -> Option<(Vec<u8>, String)>,
+{
     let mut replacements: Vec<(String, String)> = Vec::new();
-    for caps in IMG_SRC_RE.captures_iter(html) {
+    for caps in RESOURCE_REF_RE.captures_iter(html) {
         let whole = caps.get(0).unwrap().as_str().to_string();
         let src = caps.get(2).unwrap().as_str();
 
@@ -324,12 +350,9 @@ fn inline_images(
         }
 
         let resolved = resolve_path_against(&chapter_dir, src);
-        let Some(bytes) = doc.get_resource_by_path(&resolved) else {
+        let Some((bytes, mime)) = load(&resolved) else {
             continue;
         };
-        let mime = doc
-            .get_resource_mime_by_path(&resolved)
-            .unwrap_or_else(|| guess_mime_from_ext(&resolved));
         let data_uri = format!("data:{};base64,{}", mime, B64.encode(&bytes));
         let new_tag = whole.replacen(src, &data_uri, 1);
         replacements.push((whole, new_tag));
@@ -395,7 +418,12 @@ fn normalize(p: &Path) -> PathBuf {
 }
 
 fn guess_mime_from_ext(p: &Path) -> String {
-    match p.extension().and_then(|s| s.to_str()).map(str::to_ascii_lowercase).as_deref() {
+    match p
+        .extension()
+        .and_then(|s| s.to_str())
+        .map(str::to_ascii_lowercase)
+        .as_deref()
+    {
         Some("jpg") | Some("jpeg") => "image/jpeg",
         Some("png") => "image/png",
         Some("gif") => "image/gif",
@@ -410,18 +438,14 @@ fn guess_mime_from_ext(p: &Path) -> String {
 // SVG_RE was removed: stripping whole <svg> blocks discarded EPUB images
 // that inline_images had already rewritten into data: URIs nested inside
 // <image xlink:href="data:..."/> children. See strip_visual().
-static IMG_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<img\b[^>]*/?>").unwrap());
-static IMAGE_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<image\b[^>]*/?>").unwrap());
-static LINK_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?is)<link\b[^>]*/?>").unwrap());
+static IMG_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<img\b[^>]*/?>").unwrap());
+static IMAGE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<image\b[^>]*/?>").unwrap());
+static LINK_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?is)<link\b[^>]*/?>").unwrap());
 static SCRIPT_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<script\b[^>]*>.*?</script\s*>").unwrap());
 static STYLE_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"(?is)<style\b[^>]*>.*?</style\s*>").unwrap());
-static ANCHOR_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(?i)<a\s").unwrap());
+static ANCHOR_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)<a\s").unwrap());
 
 /// Detect TOC-like pages: many internal anchors and a high link-text ratio.
 /// Real chapters rarely have more than a handful of hyperlinks per page.
@@ -499,4 +523,22 @@ fn visible_char_count(html: &str) -> usize {
         }
     }
     count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    #[test]
+    fn inline_resource_refs_rewrites_svg_image_href() {
+        let html = r#"<svg><image href="../Images/pic.png" /></svg>"#;
+        let out = inline_resource_refs(html, Path::new("OPS/Text"), |p| {
+            assert_eq!(p, Path::new("OPS/Images/pic.png"));
+            Some((vec![0x89, 0x50, 0x4E, 0x47], "image/png".to_string()))
+        });
+
+        assert!(out.contains(r#"href="data:image/png;base64,iVBORw==""#));
+        assert!(!out.contains("../Images/pic.png"));
+    }
 }

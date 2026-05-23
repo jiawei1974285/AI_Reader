@@ -15,8 +15,7 @@ pub fn decrypt_to_cache(src: &Path, cache_dir: &Path) -> Result<String, String> 
     if !src.exists() {
         return Err(format!("Source file not found: {}", src.display()));
     }
-    fs::create_dir_all(cache_dir)
-        .map_err(|e| format!("Failed to create cache dir: {e}"))?;
+    fs::create_dir_all(cache_dir).map_err(|e| format!("Failed to create cache dir: {e}"))?;
 
     let mtime = src
         .metadata()

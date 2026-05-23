@@ -10,6 +10,5 @@ pub fn read_pdf_page_text(path: String, page_index: usize) -> Result<String, Str
 }
 
 pub fn extract_pages(path: &Path) -> Result<Vec<String>, String> {
-    pdf_extract::extract_text_by_pages(path)
-        .map_err(|e| format!("PDF 文本解析失败: {e}"))
+    pdf_extract::extract_text_by_pages(path).map_err(|e| format!("PDF 文本解析失败: {e}"))
 }

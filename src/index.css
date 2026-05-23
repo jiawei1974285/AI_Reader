@@ -94,6 +94,66 @@ body {
     backdrop-filter: blur(14px);
   }
 
+  .reader-header {
+    min-height: 4.25rem;
+    padding: 0.7rem 1rem 0.7rem 1.25rem;
+    gap: 1rem;
+  }
+
+  .reader-header-title {
+    min-width: 14rem;
+    max-width: min(34vw, 34rem);
+  }
+
+  .reader-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    flex: 1 1 auto;
+    min-width: 0;
+    overflow-x: auto;
+    padding-bottom: 0.05rem;
+  }
+
+  .reader-toolbar-group {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    padding-left: 0.55rem;
+    margin-left: 0.1rem;
+    border-left: 1px solid color-mix(in srgb, var(--color-paper-edge) 72%, transparent);
+    white-space: nowrap;
+  }
+
+  .reader-toolbar-group:first-child {
+    border-left: none;
+    padding-left: 0;
+    margin-left: 0;
+  }
+
+  .reader-page-control {
+    min-height: 2rem;
+    padding-inline: 0.75rem;
+    border-color: color-mix(in srgb, var(--color-paper-edge) 88%, white 12%);
+    background: color-mix(in srgb, var(--color-paper-soft) 82%, white 18%);
+  }
+
+  .reader-page-input {
+    width: 2.7rem;
+    min-height: 1.55rem;
+    border: 1px solid color-mix(in srgb, var(--color-paper-edge) 90%, white 10%);
+    border-radius: 6px;
+    background: color-mix(in srgb, var(--color-paper) 78%, white 22%);
+    text-align: center;
+    outline: none;
+  }
+
+  .reader-page-input:focus {
+    border-color: color-mix(in srgb, var(--color-accent) 45%, var(--color-paper-edge));
+    box-shadow: 0 0 0 2px color-mix(in srgb, var(--color-accent) 12%, transparent);
+  }
+
   .studio-title {
     font-family: var(--font-serif);
     color: var(--color-ink);
@@ -301,6 +361,13 @@ body {
       linear-gradient(90deg, rgba(120, 88, 40, 0.04), transparent 9%, transparent 91%, rgba(120, 88, 40, 0.04)),
       var(--color-paper);
   }
+
+  .reader-page-paged {
+    overflow-x: auto;
+    overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    scroll-behavior: smooth;
+  }
 }
 
 /* EPUB / MOBI readers now inline images as base64 data: URIs (Phase 1 has
@@ -336,6 +403,19 @@ article video {
   /* Allow more breathing on the sides */
   hyphens: auto;
   word-break: break-word;
+}
+
+.reading-paged {
+  box-sizing: border-box;
+  height: 100%;
+  min-width: 100%;
+  column-gap: 4rem;
+  column-fill: auto;
+  overflow: visible;
+}
+
+.reading-paged section {
+  break-inside: auto;
 }
 
 /* Paragraphs: classical Chinese style — 2em first-line indent, no margin
@@ -591,4 +671,25 @@ body[data-theme="dark"] .ai-hl-rect-blue {
 }
 body[data-theme="dark"] .ai-hl-rect-red {
   background: rgba(252, 100, 90, 0.55);
+}
+
+.ai-entity {
+  cursor: pointer;
+  border-radius: 2px;
+  text-decoration-line: underline;
+  text-decoration-style: dotted;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.2em;
+  transition: background 140ms ease, text-decoration-color 140ms ease;
+}
+.ai-entity-person {
+  text-decoration-color: color-mix(in srgb, var(--color-accent) 78%, transparent);
+}
+.ai-entity-place {
+  text-decoration-color: color-mix(in srgb, var(--color-blue) 78%, transparent);
+}
+.ai-entity:hover,
+.ai-entity-active {
+  background: color-mix(in srgb, var(--color-accent) 12%, transparent);
+  text-decoration-style: solid;
 }

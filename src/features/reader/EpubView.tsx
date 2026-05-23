@@ -1,11 +1,4 @@
-import {
-  memo,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   DEFAULT_READER_SETTINGS,
@@ -13,6 +6,8 @@ import {
   loadReaderSettings,
   saveReaderSettings,
   type AiSettings,
+  type Bookmark,
+  type ChapterEntity,
   type EpubPreview,
   type Highlight,
   type ReaderSettings,
@@ -28,6 +23,13 @@ import { MusicSuggestPanel } from "./MusicSuggestPanel";
 import { useReadTimeHeartbeat } from "./useReadTimeHeartbeat";
 import { applyHighlights, captureSelection } from "./highlight";
 import { BookSearch } from "./BookSearch";
+import { BookmarksPanel } from "./BookmarksPanel";
+import { ChapterEntitiesPanel } from "./ChapterEntitiesPanel";
+import {
+  applyEntityUnderlines,
+  entityKey,
+  type EntityWithKey,
+} from "./entityUnderlines";
 
 type Props = {
   path: string;
@@ -37,6 +39,7 @@ type Props = {
   onBack: () => void;
   backLabel?: string;
   initialSpine?: number;
+  initialScrollY?: number;
   initialHighlightId?: number;
 };
 
@@ -69,6 +72,7 @@ export function EpubView({
   onBack,
   backLabel = "返回书架",
   initialSpine,
+  initialScrollY,
   initialHighlightId,
 }: Props) {
   // Track whether we've already flashed the initial highlight (one-shot)
@@ -86,6 +90,10 @@ export function EpubView({
   const [settings, setSettings] = useState<ReaderSettings>(
     DEFAULT_READER_SETTINGS,
   );
+  const [settingsReady, setSettingsReady] = useState(false);
+  const [pagedWidth, setPagedWidth] = useState(720);
+  const [pageOffset, setPageOffset] = useState(0);
+  const [pageMaxOffset, setPageMaxOffset] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [musicSuggestOpen, setMusicSuggestOpen] = useState(false);
@@ -98,8 +106,20 @@ export function EpubView({
   } | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
+  const [bookmarksLoading, setBookmarksLoading] = useState(false);
+  const [entitiesOpen, setEntitiesOpen] = useState(false);
+  const [entitiesBySpine, setEntitiesBySpine] = useState<
+    Record<number, EntityWithKey[]>
+  >({});
+  const [entitiesLoading, setEntitiesLoading] = useState(false);
+  const [entitiesError, setEntitiesError] = useState<string | null>(null);
+  const [activeEntityKey, setActiveEntityKey] = useState<string | null>(null);
+  const [bookmarkStatus, setBookmarkStatus] = useState<string | null>(null);
+  const pendingInitialScroll = useRef<number | null>(initialScrollY ?? null);
 
-  // Ctrl/Cmd+F opens the in-book search bar.
+  // Ctrl/Cmd+F opens the in-book search bar (current page only; pdf.js
   // Listen in CAPTURE phase + on window so WebView2's native find toolbar
   // doesn't intercept the event before we can preventDefault it.
   useEffect(() => {
@@ -169,6 +189,18 @@ export function EpubView({
     return map;
   }, [allHighlights]);
 
+  const currentChapter = chapters.find((c) => c.spine_index === activeIdx);
+  const total = chapters[0]?.spine_total ?? 0;
+  const currentChapterLabel =
+    toc.find((t) => t.spine_index === activeIdx)?.label ??
+    `第 ${activeIdx + 1} 章`;
+  const currentEntities = entitiesBySpine[activeIdx] ?? [];
+  const aiConfigured =
+    aiSettings.base_url.trim() !== "" &&
+    aiSettings.api_key.trim() !== "" &&
+    aiSettings.chat_model.trim() !== "";
+  const isPagedMode = (settings.reading_mode ?? "scroll") === "paged";
+
   // Apply theme to <body>
   useEffect(() => {
     document.body.setAttribute("data-theme", settings.theme);
@@ -178,15 +210,34 @@ export function EpubView({
   }, [settings.theme]);
 
   useEffect(() => {
-    loadReaderSettings().then(setSettings).catch(() => {});
+    loadReaderSettings()
+      .then(setSettings)
+      .catch(() => {})
+      .finally(() => setSettingsReady(true));
   }, []);
 
+  const refreshBookmarks = useCallback(async () => {
+    setBookmarksLoading(true);
+    try {
+      setBookmarks(await ipc.listBookmarksByBook(bookId));
+    } catch {
+      setBookmarks([]);
+    } finally {
+      setBookmarksLoading(false);
+    }
+  }, [bookId]);
+
   useEffect(() => {
+    if (bookmarksOpen) refreshBookmarks();
+  }, [bookmarksOpen, refreshBookmarks]);
+
+  useEffect(() => {
+    if (!settingsReady) return;
     const t = window.setTimeout(() => {
       saveReaderSettings(settings).catch(() => {});
     }, 200);
     return () => window.clearTimeout(t);
-  }, [settings]);
+  }, [settings, settingsReady]);
 
   useEffect(() => {
     let cancelled = false;
@@ -234,11 +285,13 @@ export function EpubView({
         if (initialSpine !== undefined) {
           // Caller specified a starting chapter (e.g. jump from notes view)
           initial = await ipc.readBookChapter(path, initialSpine);
+          pendingInitialScroll.current = initialScrollY ?? 0;
         } else {
           const progress = await ipc.getProgress(bookId);
           initial = progress
             ? await ipc.readBookChapter(path, progress.spine_index)
             : await ipc.readBookInitial(path);
+          pendingInitialScroll.current = progress?.scroll_y ?? 0;
           if (!progress) {
             ipc.saveProgress(bookId, initial.spine_index, 0).catch(() => {});
           }
@@ -256,7 +309,34 @@ export function EpubView({
     return () => {
       cancelled = true;
     };
-  }, [path, bookId]);
+  }, [path, bookId, initialSpine, initialScrollY]);
+
+  useEffect(() => {
+    const y = pendingInitialScroll.current;
+    if (!settingsReady || y == null || chapters.length === 0) return;
+    pendingInitialScroll.current = null;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (isPagedMode) {
+          scrollRef.current?.scrollTo({ left: Math.max(0, y), top: 0 });
+        } else {
+          scrollRef.current?.scrollTo({ top: Math.max(0, y), left: 0 });
+        }
+      });
+    });
+  }, [chapters, isPagedMode, settingsReady]);
+
+  useEffect(() => {
+    if (!isPagedMode || chapters.length <= 1) return;
+    const current =
+      chapters.find((chapter) => chapter.spine_index === activeIdx) ??
+      chapters[0];
+    setChapters([current]);
+    requestAnimationFrame(() => {
+      scrollRef.current?.scrollTo({ left: 0, top: 0 });
+      ipc.saveProgress(bookId, current.spine_index, 0).catch(() => {});
+    });
+  }, [activeIdx, bookId, chapters, isPagedMode]);
 
   // When opened with an initial highlight (jump from notes view), once both
   // the chapter and the highlight metadata are loaded, scroll to and flash
@@ -274,19 +354,29 @@ export function EpubView({
         if (!mark || !scrollRef.current) return;
         const cr = scrollRef.current.getBoundingClientRect();
         const mr = mark.getBoundingClientRect();
-        const offset = mr.top - cr.top + scrollRef.current.scrollTop - 120;
-        scrollRef.current.scrollTo({ top: offset, behavior: "smooth" });
+        if (isPagedMode) {
+          const offset = mr.left - cr.left + scrollRef.current.scrollLeft - 40;
+          scrollRef.current.scrollTo({
+            left: offset,
+            top: 0,
+            behavior: "smooth",
+          });
+        } else {
+          const offset = mr.top - cr.top + scrollRef.current.scrollTop - 120;
+          scrollRef.current.scrollTo({ top: offset, behavior: "smooth" });
+        }
         mark.classList.add("ai-hl-flash");
         window.setTimeout(() => mark.classList.remove("ai-hl-flash"), 1500);
         flashedInitial.current = true;
       });
     });
-  }, [chapters, allHighlights, initialHighlightId]);
+  }, [chapters, allHighlights, initialHighlightId, isPagedMode]);
 
   // Auto-load next chapter
   useEffect(() => {
     const sentinel = sentinelRef.current;
     const root = scrollRef.current;
+    if (isPagedMode) return;
     if (!sentinel || !root || loading) return;
     const last = chapters[chapters.length - 1];
     if (!last) return;
@@ -310,7 +400,7 @@ export function EpubView({
     );
     obs.observe(sentinel);
     return () => obs.disconnect();
-  }, [chapters, loading, loadingMore, path]);
+  }, [chapters, loading, loadingMore, path, isPagedMode]);
 
   // Save progress on scroll
   useEffect(() => {
@@ -321,6 +411,12 @@ export function EpubView({
     const onScroll = () => {
       if (timer) window.clearTimeout(timer);
       timer = window.setTimeout(() => {
+        if (isPagedMode) {
+          setPageOffset(root.scrollLeft);
+          setPageMaxOffset(Math.max(0, root.scrollWidth - root.clientWidth));
+          ipc.saveProgress(bookId, activeIdx, root.scrollLeft).catch(() => {});
+          return;
+        }
         const probe = root.scrollTop + 80;
         let current = chapters[0].spine_index;
         for (const ch of chapters) {
@@ -338,9 +434,35 @@ export function EpubView({
       root.removeEventListener("scroll", onScroll);
       if (timer) window.clearTimeout(timer);
     };
-  }, [chapters, bookId, activeIdx]);
+  }, [chapters, bookId, activeIdx, isPagedMode]);
 
-  // Selection → floating toolbar
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root) return;
+    const syncPagedSize = () => {
+      setPagedWidth(Math.max(320, root.clientWidth));
+      setPageOffset(root.scrollLeft);
+      setPageMaxOffset(Math.max(0, root.scrollWidth - root.clientWidth));
+    };
+    syncPagedSize();
+    const ro = new ResizeObserver(syncPagedSize);
+    ro.observe(root);
+    return () => ro.disconnect();
+  }, [chapters, isPagedMode, settings.toc_sidebar_open, entitiesOpen]);
+
+  useEffect(() => {
+    if (!isPagedMode) return;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const root = scrollRef.current;
+        if (!root) return;
+        setPageOffset(root.scrollLeft);
+        setPageMaxOffset(Math.max(0, root.scrollWidth - root.clientWidth));
+      });
+    });
+  }, [chapters, isPagedMode, pagedWidth, settings.font_size, settings.line_height]);
+
+  // Selection floating toolbar
   useEffect(() => {
     function onMouseUp() {
       window.setTimeout(() => {
@@ -393,12 +515,13 @@ export function EpubView({
     return () => document.removeEventListener("mousedown", onMouseDown);
   }, []);
 
-  // Click on existing highlight → open popover
+  // Click on existing highlight open popover
   useEffect(() => {
     const root = scrollRef.current;
     if (!root) return;
     function onClick(e: Event) {
       const target = e.target as HTMLElement;
+      if (target.closest(".ai-entity")) return;
       const mark = target.closest("mark.ai-hl") as HTMLElement | null;
       if (!mark) return;
       e.preventDefault();
@@ -411,6 +534,28 @@ export function EpubView({
     root.addEventListener("click", onClick);
     return () => root.removeEventListener("click", onClick);
   }, [allHighlights]);
+
+  useEffect(() => {
+    const root = scrollRef.current;
+    if (!root) return;
+    function onClick(e: Event) {
+      const target = e.target as HTMLElement;
+      const span = target.closest(".ai-entity") as HTMLElement | null;
+      if (!span) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const key = span.dataset.entityKey;
+      if (!key) return;
+      const entity = Object.values(entitiesBySpine)
+        .flat()
+        .find((item) => item.key === key);
+      if (!entity) return;
+      setEntitiesOpen(true);
+      setActiveEntityKey(entity.key);
+    }
+    root.addEventListener("click", onClick);
+    return () => root.removeEventListener("click", onClick);
+  }, [entitiesBySpine]);
 
   async function commitHighlight(color: HighlightColor) {
     if (!pendingSel) return;
@@ -469,6 +614,104 @@ export function EpubView({
     }
   }, [chapters, loadingPrev, path]);
 
+  const goToPrevPage = useCallback(async () => {
+    const root = scrollRef.current;
+    if (!root || loadingPrev) return;
+    const pageStep = getPagedStep(root);
+    if (root.scrollLeft > 8) {
+      const left = Math.max(0, root.scrollLeft - pageStep);
+      root.scrollTo({ left, top: 0, behavior: "smooth" });
+      setPageOffset(left);
+      ipc.saveProgress(bookId, activeIdx, left).catch(() => {});
+      return;
+    }
+    if (activeIdx <= 0) return;
+
+    setLoadingPrev(true);
+    try {
+      const prev = await ipc.readBookChapter(path, activeIdx - 1);
+      setChapters([prev]);
+      chapterEls.current.clear();
+      setActiveIdx(prev.spine_index);
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const nextRoot = scrollRef.current;
+          if (!nextRoot) return;
+          const left = Math.max(0, nextRoot.scrollWidth - nextRoot.clientWidth);
+          nextRoot.scrollTo({ left, top: 0 });
+          setPageOffset(left);
+          setPageMaxOffset(left);
+          ipc.saveProgress(bookId, prev.spine_index, left).catch(() => {});
+        });
+      });
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoadingPrev(false);
+    }
+  }, [activeIdx, bookId, loadingPrev, path]);
+
+  const goToNextPage = useCallback(async () => {
+    const root = scrollRef.current;
+    if (!root || loadingMore) return;
+    const maxLeft = Math.max(0, root.scrollWidth - root.clientWidth);
+    const pageStep = getPagedStep(root);
+    if (root.scrollLeft < maxLeft - 8) {
+      const left = Math.min(maxLeft, root.scrollLeft + pageStep);
+      root.scrollTo({ left, top: 0, behavior: "smooth" });
+      setPageOffset(left);
+      setPageMaxOffset(maxLeft);
+      ipc.saveProgress(bookId, activeIdx, left).catch(() => {});
+      return;
+    }
+    if (activeIdx >= total - 1) return;
+
+    setLoadingMore(true);
+    try {
+      const next = await ipc.readBookChapter(path, activeIdx + 1);
+      setChapters([next]);
+      chapterEls.current.clear();
+      setActiveIdx(next.spine_index);
+      setPageOffset(0);
+      requestAnimationFrame(() => {
+        scrollRef.current?.scrollTo({ left: 0, top: 0 });
+        setPageMaxOffset(
+          Math.max(
+            0,
+            (scrollRef.current?.scrollWidth ?? 0) -
+              (scrollRef.current?.clientWidth ?? 0),
+          ),
+        );
+      });
+      ipc.saveProgress(bookId, next.spine_index, 0).catch(() => {});
+    } catch (e) {
+      setError(String(e));
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [activeIdx, bookId, loadingMore, path, total]);
+
+  useEffect(() => {
+    if (!isPagedMode) return;
+    function onKey(e: KeyboardEvent) {
+      const target = e.target as HTMLElement | null;
+      if (
+        target?.closest?.("input, textarea, select, [contenteditable='true']")
+      ) {
+        return;
+      }
+      if (e.key === "ArrowLeft") {
+        e.preventDefault();
+        goToPrevPage();
+      } else if (e.key === "ArrowRight" || e.key === " ") {
+        e.preventDefault();
+        goToNextPage();
+      }
+    }
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [goToNextPage, goToPrevPage, isPagedMode]);
+
   // Jump to a specific chapter; optionally then scroll to a specific highlight
   const jumpToChapter = useCallback(
     async (spineIdx: number, hlIdToFlash?: number) => {
@@ -476,17 +719,24 @@ export function EpubView({
       const scrollToMark = (mark: HTMLElement) => {
         const containerRect = scrollRef.current!.getBoundingClientRect();
         const markRect = mark.getBoundingClientRect();
-        const offset =
-          markRect.top -
-          containerRect.top +
-          scrollRef.current!.scrollTop -
-          120;
-        scrollRef.current!.scrollTo({ top: offset, behavior: "smooth" });
+        if (isPagedMode) {
+          const offset =
+            markRect.left - containerRect.left + scrollRef.current!.scrollLeft - 40;
+          scrollRef.current!.scrollTo({
+            left: offset,
+            top: 0,
+            behavior: "smooth",
+          });
+        } else {
+          const offset =
+            markRect.top - containerRect.top + scrollRef.current!.scrollTop - 120;
+          scrollRef.current!.scrollTo({ top: offset, behavior: "smooth" });
+        }
         mark.classList.add("ai-hl-flash");
         window.setTimeout(() => mark.classList.remove("ai-hl-flash"), 1500);
       };
 
-      if (existing && scrollRef.current) {
+      if (!isPagedMode && existing && scrollRef.current) {
         if (hlIdToFlash) {
           const mark = existing.querySelector(
             `mark.ai-hl[data-hl-id="${hlIdToFlash}"]`,
@@ -517,7 +767,7 @@ export function EpubView({
         // After paint, find and flash the target mark if requested
         requestAnimationFrame(() => {
           requestAnimationFrame(() => {
-            scrollRef.current?.scrollTo({ top: 0 });
+            scrollRef.current?.scrollTo({ top: 0, left: 0 });
             if (hlIdToFlash) {
               const mark = document.querySelector(
                 `mark.ai-hl[data-hl-id="${hlIdToFlash}"]`,
@@ -532,8 +782,80 @@ export function EpubView({
         setLoading(false);
       }
     },
-    [bookId, path],
+    [bookId, isPagedMode, path],
   );
+
+  const jumpToBookmark = useCallback(
+    async (bookmark: Bookmark) => {
+      setBookmarksOpen(false);
+      const existing = chapterEls.current.get(bookmark.spine_index);
+      if (existing && scrollRef.current) {
+        if (isPagedMode) {
+          scrollRef.current.scrollTo({
+            left: Math.max(0, bookmark.scroll_y),
+            top: 0,
+            behavior: "smooth",
+          });
+        } else {
+          scrollRef.current.scrollTo({
+            top: Math.max(0, bookmark.scroll_y),
+            left: 0,
+            behavior: "smooth",
+          });
+        }
+        setActiveIdx(bookmark.spine_index);
+        ipc
+          .saveProgress(bookId, bookmark.spine_index, bookmark.scroll_y)
+          .catch(() => {});
+        return;
+      }
+
+      setLoading(true);
+      setError(null);
+      try {
+        const ch = await ipc.readBookChapter(path, bookmark.spine_index);
+        setChapters([ch]);
+        chapterEls.current.clear();
+        setActiveIdx(bookmark.spine_index);
+        ipc
+          .saveProgress(bookId, bookmark.spine_index, bookmark.scroll_y)
+          .catch(() => {});
+        requestAnimationFrame(() => {
+          requestAnimationFrame(() => {
+            if (isPagedMode) {
+              scrollRef.current?.scrollTo({
+                left: Math.max(0, bookmark.scroll_y),
+                top: 0,
+                behavior: "smooth",
+              });
+            } else {
+              scrollRef.current?.scrollTo({
+                top: Math.max(0, bookmark.scroll_y),
+                left: 0,
+                behavior: "smooth",
+              });
+            }
+          });
+        });
+      } catch (e) {
+        setError(String(e));
+      } finally {
+        setLoading(false);
+      }
+    },
+    [bookId, isPagedMode, path],
+  );
+
+  async function deleteBookmark(bookmark: Bookmark) {
+    if (!window.confirm("删除这条书签？")) return;
+    try {
+      await ipc.deleteBookmark(bookmark.id);
+      setBookmarks((prev) => prev.filter((item) => item.id !== bookmark.id));
+    } catch (e) {
+      setBookmarkStatus(`书签删除失败：${String(e)}`);
+      window.setTimeout(() => setBookmarkStatus(null), 1800);
+    }
+  }
 
   const registerChapterEl = useCallback(
     (idx: number, el: HTMLElement | null) => {
@@ -543,7 +865,79 @@ export function EpubView({
     [],
   );
 
-  const total = chapters[0]?.spine_total ?? 0;
+  async function extractCurrentEntities() {
+    if (!currentChapter) return;
+    if (!aiConfigured) {
+      setEntitiesError("请先在 AI 设置中配置模型接口。");
+      return;
+    }
+    setEntitiesOpen(true);
+    setEntitiesLoading(true);
+    setEntitiesError(null);
+    setActiveEntityKey(null);
+    try {
+      const result = await ipc.aiExtractEntities({
+        chapterLabel: currentChapterLabel,
+        chapterText: htmlToText(currentChapter.html),
+      });
+      const withKeys = normalizeEntities(result);
+      setEntitiesBySpine((prev) => ({
+        ...prev,
+        [currentChapter.spine_index]: withKeys,
+      }));
+      if (withKeys.length === 0) {
+        setEntitiesError("本章没有提取到明显的人名或地名。");
+      }
+    } catch (e) {
+      setEntitiesError(String(e));
+    } finally {
+      setEntitiesLoading(false);
+    }
+  }
+
+  async function addBookmark() {
+    if (!currentChapter) return;
+    const scrollY = isPagedMode
+      ? (scrollRef.current?.scrollLeft ?? 0)
+      : (scrollRef.current?.scrollTop ?? 0);
+    const label = currentChapterLabel;
+    const excerpt = htmlToText(currentChapter.html).slice(0, 120);
+    setBookmarkStatus("保存中...");
+    try {
+      await ipc.createBookmark({
+        bookId,
+        spineIndex: activeIdx,
+        scrollY,
+        label,
+        excerpt,
+      });
+      if (bookmarksOpen) refreshBookmarks();
+      setBookmarkStatus("已加入书签");
+      window.setTimeout(() => setBookmarkStatus(null), 1600);
+    } catch (e) {
+      setBookmarkStatus(`书签保存失败：${String(e)}`);
+    }
+  }
+
+  function selectEntity(entity: EntityWithKey) {
+    setActiveEntityKey(entity.key);
+    const chapterEl = chapterEls.current.get(activeIdx);
+    const first = chapterEl?.querySelector(
+      `.ai-entity[data-entity-key="${cssEscape(entity.key)}"]`,
+    ) as HTMLElement | null;
+    if (first && scrollRef.current) {
+      const cr = scrollRef.current.getBoundingClientRect();
+      const er = first.getBoundingClientRect();
+      if (isPagedMode) {
+        const offset = er.left - cr.left + scrollRef.current.scrollLeft - 40;
+        scrollRef.current.scrollTo({ left: offset, top: 0, behavior: "smooth" });
+      } else {
+        const offset = er.top - cr.top + scrollRef.current.scrollTop - 120;
+        scrollRef.current.scrollTo({ top: offset, behavior: "smooth" });
+      }
+    }
+  }
+
   const atLast =
     chapters.length > 0 &&
     chapters[chapters.length - 1].spine_index >= total - 1;
@@ -556,9 +950,16 @@ export function EpubView({
           : "var(--font-sans)",
       fontSize: `${settings.font_size}px`,
       lineHeight: settings.line_height,
-      maxWidth: `${settings.column_width}em`,
+      ...(isPagedMode
+        ? {
+            columnWidth: `${pagedWidth}px`,
+            maxWidth: "none",
+          }
+        : {
+            maxWidth: `${settings.column_width}em`,
+          }),
     }),
-    [settings],
+    [isPagedMode, pagedWidth, settings],
   );
 
   if (loading && chapters.length === 0) {
@@ -573,10 +974,7 @@ export function EpubView({
     return (
       <div className="app-frame flex flex-col items-center justify-center gap-4 px-6 text-center">
         <p className="text-sm text-red-600 max-w-xl">{error}</p>
-        <button
-          onClick={onBack}
-          className="studio-button"
-        >
+        <button onClick={onBack} className="studio-button">
           返回书架
         </button>
       </div>
@@ -587,88 +985,137 @@ export function EpubView({
 
   return (
     <div className="app-frame relative flex flex-col">
-      <header className="studio-header px-6 py-3.5 flex items-center justify-between gap-4">
-        <div className="min-w-0 flex-1">
+      <header className="studio-header reader-header flex items-center justify-between">
+        <div className="reader-header-title min-w-0">
           <h2 className="studio-title text-lg leading-tight truncate">
             {head?.title}
           </h2>
           <p className="text-xs studio-subtle truncate mt-0.5 tracking-wide">
-            {head?.author}
+            {head?.author || "未知作者"}
           </p>
         </div>
-        <div className="flex items-center gap-1.5 text-xs flex-shrink-0">
-          <button
-            onClick={() =>
-              setSettings((s) => ({
-                ...s,
-                toc_sidebar_open: !s.toc_sidebar_open,
-              }))
-            }
-            className={`studio-ghost ${
-              settings.toc_sidebar_open ? "studio-ghost-active" : ""
-            }`}
-          >
-            目录
-          </button>
-          <button
-            onClick={() => setAnnotationsOpen(true)}
-            className="studio-ghost"
-          >
-            标注{allHighlights.length > 0 ? ` · ${allHighlights.length}` : ""}
-          </button>
-          <button
-            onClick={() => setSearchOpen(true)}
-            className="studio-ghost"
-            title="本书内查找 (Ctrl+F)"
-          >
-            查找
-          </button>
-          <button
-            onClick={() => setChatOpen(true)}
-            className="studio-ghost"
-          >
-            问 AI
-          </button>
-          <button
-            onClick={() => setMusicSuggestOpen(true)}
-            className="studio-ghost"
-          >
-            AI 配乐
-          </button>
-          <span className="studio-chip tabular-nums">
-            第 {activeIdx + 1} / {total} 章
-          </span>
-          <button
-            onClick={loadPrev}
-            disabled={loadingPrev || (chapters[0]?.spine_index ?? 0) <= 0}
-            className="studio-button disabled:opacity-30 disabled:cursor-not-allowed"
-            title="加载上一章"
-          >
-            {loadingPrev ? "…" : "↑ 上一章"}
-          </button>
-          <button
-            onClick={toggleFullscreen}
-            className={`studio-ghost ${
-              fullscreen ? "studio-ghost-active" : ""
-            }`}
-            title={fullscreen ? "退出全屏" : "全屏 (F11)"}
-          >
-            {fullscreen ? "退出全屏" : "全屏"}
-          </button>
-          <button
-            onClick={() => setSettingsOpen(true)}
-            className="studio-ghost"
-          >
-            设置
-          </button>
-          <button
-            onClick={onBack}
-            className="studio-button"
-          >
-            {backLabel}
-          </button>
+        <div className="reader-toolbar text-xs">
+          <div className="reader-toolbar-group">
+            <button
+              onClick={() =>
+                setSettings((s) => ({
+                  ...s,
+                  toc_sidebar_open: !s.toc_sidebar_open,
+                }))
+              }
+              className={`studio-ghost ${
+                settings.toc_sidebar_open ? "studio-ghost-active" : ""
+              }`}
+            >
+              目录
+            </button>
+            <button
+              onClick={() => setAnnotationsOpen(true)}
+              className="studio-ghost"
+            >
+              标注{allHighlights.length > 0 ? ` · ${allHighlights.length}` : ""}
+            </button>
+            <button
+              onClick={addBookmark}
+              className="studio-ghost"
+              title="保存当前阅读位置"
+            >
+              书签
+            </button>
+            <button
+              onClick={() => setBookmarksOpen(true)}
+              className={`studio-ghost ${
+                bookmarksOpen ? "studio-ghost-active" : ""
+              }`}
+              title="查看当前书的书签"
+            >
+              书签列表{bookmarks.length > 0 ? ` · ${bookmarks.length}` : ""}
+            </button>
+            <button
+              onClick={() => setSearchOpen(true)}
+              className="studio-ghost"
+              title="本书内查找 (Ctrl+F)"
+            >
+              查找
+            </button>
+            <button onClick={() => setChatOpen(true)} className="studio-ghost">
+              问 AI
+            </button>
+            <button
+              onClick={() => setMusicSuggestOpen(true)}
+              className="studio-ghost"
+            >
+              AI 配乐
+            </button>
+            <button
+              onClick={() => setEntitiesOpen((v) => !v)}
+              className={`studio-ghost ${
+                entitiesOpen ? "studio-ghost-active" : ""
+              }`}
+            >
+              实体
+              {currentEntities.length > 0 ? ` · ${currentEntities.length}` : ""}
+            </button>
+          </div>
+          <div className="reader-toolbar-group">
+            <span className="studio-chip reader-page-control tabular-nums">
+              第 {activeIdx + 1} / {total} 章
+            </span>
+            <button
+              onClick={isPagedMode ? goToPrevPage : loadPrev}
+              disabled={
+                loadingPrev ||
+                (isPagedMode
+                  ? activeIdx <= 0 && pageOffset <= 8
+                  : (chapters[0]?.spine_index ?? 0) <= 0)
+              }
+              className="studio-button disabled:opacity-30 disabled:cursor-not-allowed"
+              title={isPagedMode ? "上一页" : "加载上一章"}
+            >
+              {loadingPrev ? "..." : isPagedMode ? "← 上一页" : "↑ 上一章"}
+            </button>
+            {isPagedMode && (
+              <button
+                onClick={goToNextPage}
+                disabled={
+                  loadingMore ||
+                  (activeIdx >= total - 1 && pageOffset >= pageMaxOffset - 8)
+                }
+                className="studio-button disabled:opacity-30 disabled:cursor-not-allowed"
+                title="下一页"
+              >
+                {loadingMore ? "..." : "下一页 →"}
+              </button>
+            )}
+          </div>
+          <div className="reader-toolbar-group">
+            <button
+              onClick={toggleFullscreen}
+              className={`studio-ghost ${
+                fullscreen ? "studio-ghost-active" : ""
+              }`}
+              title={fullscreen ? "退出全屏" : "全屏 (F11)"}
+            >
+              {fullscreen ? "退出全屏" : "全屏"}
+            </button>
+            <button
+              onClick={() => setSettingsOpen(true)}
+              className="studio-ghost"
+            >
+              设置
+            </button>
+            <button onClick={onBack} className="studio-button">
+              {backLabel}
+            </button>
+          </div>
         </div>
       </header>
+
+      {bookmarkStatus && (
+        <div className="absolute right-6 top-20 z-40 rounded border border-[var(--color-paper-edge)] bg-[var(--color-paper)] px-3 py-2 text-xs text-[var(--color-accent)] shadow-sm">
+          {bookmarkStatus}
+        </div>
+      )}
 
       <div className="flex-1 flex overflow-hidden">
         {settings.toc_sidebar_open && (
@@ -682,40 +1129,69 @@ export function EpubView({
             }
           />
         )}
-        <div ref={scrollRef} className="reader-page flex-1 overflow-auto">
-        <article
-          className={`reading mx-auto px-10 md:px-16 py-16 ${
-            settings.paragraph_indent ? "" : "indent-none"
+        {bookmarksOpen && (
+          <BookmarksPanel
+            bookmarks={bookmarks}
+            toc={toc}
+            loading={bookmarksLoading}
+            onJump={jumpToBookmark}
+            onDelete={deleteBookmark}
+            onClose={() => setBookmarksOpen(false)}
+          />
+        )}
+        <div
+          ref={scrollRef}
+          className={`reader-page flex-1 ${
+            isPagedMode ? "reader-page-paged" : "overflow-auto"
           }`}
-          style={readingStyle}
         >
-          {chapters.map((ch, i) => (
-            <ChapterBlock
-              key={ch.spine_index}
-              chapter={ch}
-              showDivider={i > 0}
-              highlights={highlightsForChapter.get(ch.spine_index) ?? []}
-              registerRef={registerChapterEl}
-            />
-          ))}
-          <div ref={sentinelRef} className="h-2" />
-          {loadingMore && (
-            <div className="text-center py-8 text-sm text-[var(--color-muted)] tracking-wider">
-              加载下一章…
-            </div>
-          )}
-          {atLast && !loadingMore && (
-            <div className="text-center py-16 text-xs text-[var(--color-muted)] tracking-[0.5em]">
-              — 完 —
-            </div>
-          )}
-        </article>
+          <article
+            className={`reading mx-auto px-10 md:px-16 py-16 ${
+              settings.paragraph_indent ? "" : "indent-none"
+            } ${isPagedMode ? "reading-paged" : ""}`}
+            style={readingStyle}
+          >
+            {chapters.map((ch, i) => (
+              <ChapterBlock
+                key={ch.spine_index}
+                chapter={ch}
+                showDivider={i > 0}
+                highlights={highlightsForChapter.get(ch.spine_index) ?? []}
+                entities={entitiesBySpine[ch.spine_index] ?? []}
+                activeEntityKey={activeEntityKey}
+                registerRef={registerChapterEl}
+              />
+            ))}
+            {!isPagedMode && <div ref={sentinelRef} className="h-2" />}
+            {!isPagedMode && loadingMore && (
+              <div className="text-center py-8 text-sm text-[var(--color-muted)] tracking-wider">
+                加载下一章...
+              </div>
+            )}
+            {!isPagedMode && atLast && !loadingMore && (
+              <div className="text-center py-16 text-xs text-[var(--color-muted)] tracking-[0.5em]">
+                完
+              </div>
+            )}
+          </article>
         </div>
+        {entitiesOpen && (
+          <ChapterEntitiesPanel
+            chapterLabel={currentChapterLabel}
+            aiConfigured={aiConfigured}
+            entities={currentEntities}
+            loading={entitiesLoading}
+            error={entitiesError}
+            activeKey={activeEntityKey}
+            onExtract={extractCurrentEntities}
+            onSelect={selectEntity}
+            onOpenSettings={onOpenAiSettings}
+            onClose={() => setEntitiesOpen(false)}
+          />
+        )}
       </div>
 
-      {/* Chapter progress strip — pinned to the bottom of the reader so
-       *  it's always visible without taking up vertical reading space.
-       *  Pure information; non-interactive. */}
+      {/* Chapter progress strip pinned to the bottom of the reader. */}
       {total > 0 && (
         <div className="flex-shrink-0 px-6 py-1.5 border-t border-[var(--color-paper-edge)] bg-[var(--color-paper-soft)]/60 flex items-center gap-3">
           <span className="text-[10px] studio-subtle tracking-[0.1em] tabular-nums">
@@ -774,7 +1250,7 @@ export function EpubView({
             className="px-2 py-0.5 rounded-full text-xs hover:bg-white/15 transition"
             title="问 AI 这段是什么意思"
           >
-            ✦ 问 AI
+            问 AI
           </button>
         </div>
       )}
@@ -794,9 +1270,7 @@ export function EpubView({
           spineIndex={lookupSel.spineIdx}
           prefix={lookupSel.prefix}
           suffix={lookupSel.suffix}
-          onHighlightCreated={(hl) =>
-            setAllHighlights((prev) => [...prev, hl])
-          }
+          onHighlightCreated={(hl) => setAllHighlights((prev) => [...prev, hl])}
           aiConfigured={
             aiSettings.base_url.trim() !== "" &&
             aiSettings.api_key.trim() !== "" &&
@@ -899,6 +1373,8 @@ type ChapterBlockProps = {
   chapter: EpubPreview;
   showDivider: boolean;
   highlights: Highlight[];
+  entities: EntityWithKey[];
+  activeEntityKey: string | null;
   registerRef: (idx: number, el: HTMLElement | null) => void;
 };
 
@@ -915,10 +1391,40 @@ function htmlToText(html: string): string {
   return s;
 }
 
+function normalizeEntities(entities: ChapterEntity[]): EntityWithKey[] {
+  const seen = new Set<string>();
+  const out: EntityWithKey[] = [];
+  for (const entity of entities) {
+    const name = entity.name.trim();
+    const summary = entity.summary.trim();
+    if (!name || !summary) continue;
+    const kind = entity.kind === "person" ? "person" : "place";
+    const normalized = { name, summary, kind };
+    const key = entityKey(normalized);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...normalized, key });
+  }
+  return out;
+}
+
+function cssEscape(value: string): string {
+  if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(value);
+  return value.replace(/["\\]/g, "\\$&");
+}
+
+function getPagedStep(root: HTMLElement): number {
+  const article = root.querySelector(".reading-paged");
+  const gap = article ? Number.parseFloat(getComputedStyle(article).columnGap) : 0;
+  return Math.max(320, root.clientWidth + (Number.isFinite(gap) ? gap : 0));
+}
+
 const ChapterBlock = memo(function ChapterBlock({
   chapter,
   showDivider,
   highlights,
+  entities,
+  activeEntityKey,
   registerRef,
 }: ChapterBlockProps) {
   const ref = useRef<HTMLElement | null>(null);
@@ -932,14 +1438,16 @@ const ChapterBlock = memo(function ChapterBlock({
   );
 
   useEffect(() => {
-    if (ref.current) applyHighlights(ref.current, highlights);
-  }, [chapter.html, highlights]);
+    if (!ref.current) return;
+    applyHighlights(ref.current, highlights);
+    applyEntityUnderlines(ref.current, entities, activeEntityKey);
+  }, [chapter.html, highlights, entities, activeEntityKey]);
 
   return (
     <section ref={onRef} data-spine={chapter.spine_index}>
       {showDivider && (
         <div className="text-center my-12 text-[var(--color-muted)] tracking-[0.5em]">
-          · · ·
+          ...
         </div>
       )}
       <div dangerouslySetInnerHTML={{ __html: chapter.html }} />

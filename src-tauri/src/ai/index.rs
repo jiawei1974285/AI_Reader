@@ -27,7 +27,7 @@ pub fn extract_chapters(path: &Path) -> Result<Vec<ChapterText>, String> {
         "epub" => extract_epub_chapters(path),
         "txt" => extract_txt_chapters(path),
         "docx" => extract_docx_chapters(path),
-        "mobi" => extract_mobi_chapters(path),
+        "mobi" | "azw" | "azw3" => extract_mobi_chapters(path),
         "pdf" => extract_pdf_pages(path),
         other => Err(format!("Unsupported format for indexing: {other}")),
     }
@@ -188,8 +188,7 @@ where
     let conn = Connection::open(db_path).map_err(|e| e.to_string())?;
     conn.pragma_update(None, "foreign_keys", "ON").ok();
     db::clear_book_chunks(&conn, book_id).map_err(|e| e.to_string())?;
-    db::set_index_status(&conn, book_id, "indexing", 0, None, None)
-        .map_err(|e| e.to_string())?;
+    db::set_index_status(&conn, book_id, "indexing", 0, None, None).map_err(|e| e.to_string())?;
 
     let mut chunks_count = 0usize;
     for (i, chapter) in chapters.iter().enumerate() {
@@ -206,8 +205,7 @@ where
                 chunks.len()
             ));
         }
-        for (chunk_idx, (text, emb)) in chunks.iter().zip(embeddings.iter()).enumerate()
-        {
+        for (chunk_idx, (text, emb)) in chunks.iter().zip(embeddings.iter()).enumerate() {
             let blob = embed::embedding_to_blob(emb);
             db::insert_chunk(
                 &conn,

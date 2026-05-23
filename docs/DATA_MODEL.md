@@ -76,6 +76,24 @@ CREATE TABLE reading_progress (
 
 一个 book 一条记录。书删除时级联清。
 
+### `bookmarks` — 手动书签
+
+```sql
+CREATE TABLE bookmarks (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id     INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    spine_index INTEGER NOT NULL DEFAULT 0,     -- 章节 / PDF 页码，从 0 开始
+    scroll_y    REAL    NOT NULL DEFAULT 0,     -- 章节 / 页面内 scrollTop
+    label       TEXT    NOT NULL,               -- 目录名 / 页码标签
+    excerpt     TEXT    NOT NULL DEFAULT '',    -- 保存时附近文本预览
+    created_at  INTEGER NOT NULL
+);
+CREATE INDEX idx_bookmarks_book    ON bookmarks(book_id);
+CREATE INDEX idx_bookmarks_created ON bookmarks(created_at DESC);
+```
+
+一个 book 可以有多条书签。首页读取最近书签，点击后用 `spine_index + scroll_y` 直接进入阅读页对应位置。
+
 ### `app_config` — 杂项 KV
 
 ```sql
@@ -192,7 +210,7 @@ CREATE INDEX idx_chat_messages_session
 |---|---|
 | `scan_library` | books 表 upsert；磁盘消失的孤儿删；EPUB 顺手更 cover_path |
 | `set_library_root` 切换 | 旧库数据保留，新扫描会形成两套并存（按 file_path 区分） |
-| 删一本书（手动 SQL，UI 暂未提供） | CASCADE 触发：reading_progress / highlights / book_chunks / book_index_status / chat_messages 都被清；covers/ 文件**不自动清**（孤儿） |
+| 删一本书（手动 SQL，UI 暂未提供） | CASCADE 触发：reading_progress / bookmarks / highlights / book_chunks / book_index_status / chat_messages 都被清；covers/ 文件**不自动清**（孤儿） |
 | `ai_index_book` 重索引 | 先 DELETE 该 book_id 下所有 book_chunks 再写入；book_index_status upsert |
 | `ai_classify_books(force=false)` | 仅未分类的书；`force=true` 全跑 |
 | `ai_tag_music_tracks` | 跳过 `track_path + file_mtime` 没变的；变了重标 |
@@ -229,6 +247,7 @@ let _ = conn.execute(
 | 表 | 主要查询模式 | 索引 |
 |---|---|---|
 | books | 按 added_at 倒序列、按 file_path 查 | `idx_books_added_at` + UNIQUE(file_path) |
+| bookmarks | 首页按 created_at 倒序列、按 book_id 级联查 | `idx_bookmarks_created` + `idx_bookmarks_book` |
 | highlights | 按 book_id 列、按 (book_id, spine_index) 列、按 query LIKE 搜 | `idx_highlights_book` + `idx_highlights_chapter` |
 | book_chunks | 按 book_id 列（全量）、跨 book 列（library RAG） | `idx_book_chunks_book` |
 | chat_messages | 按 (book_id, mode, spine_index) + created_at 顺序列 | `idx_chat_messages_session` 复合索引 |
@@ -247,11 +266,11 @@ let _ = conn.execute(
                         │ id  │◄─────────────────────────┐
                         │ … │                            │
                         └─┬───┘                          │
-              ┌───────────┼───────────┬────────────────┐ │
-              │           │           │                │ │
-              ▼           ▼           ▼                ▼ │
-   reading_progress  highlights  book_chunks   book_index_status
-   (1:1)             (1:N)       (1:N)         (1:1)
+              ┌───────────┼───────────┬───────────┬────────────────┐ │
+              │           │           │           │                │ │
+              ▼           ▼           ▼           ▼                ▼ │
+   reading_progress  bookmarks   highlights  book_chunks   book_index_status
+   (1:1)             (1:N)      (1:N)       (1:N)         (1:1)
                                                           │
               ┌──────────────────────────────────────────┘
               │

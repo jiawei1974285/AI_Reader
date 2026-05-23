@@ -250,7 +250,7 @@ let _ = conn.execute(
 
 ## 7. 测试
 
-> **当前状态：没有自动化测试。** 这是有意为之 — 业务在快速迭代，UI 占比大，单测覆盖收益低。
+> **当前状态：已有一组基础自动化测试。** 后端核心路径用 `cargo test --lib` 覆盖 URL 拼接、AI 错误脱敏、实体 JSON、EPUB 图片内联、MOBI/AZW 判码和章节 fallback；前端仍以 `npm run build` 的 TypeScript 检查为主。
 
 人工测试套路（每次改完 AI / 持久化 / reader 之后都跑）：
 
@@ -261,8 +261,16 @@ let _ = conn.execute(
 5. AI 三模都问一遍，看流式 + 引用跳转。
 6. 跑 NCM 解密 + 音乐 mini player 跨页不断流。
 
-未来想加自动化：
-- Rust 业务模块（db / chunker / scanner）适合 `cargo test`。
+常用自动化检查：
+```powershell
+npm run build
+cd src-tauri
+cargo test --lib
+git diff --check
+```
+
+未来想继续补：
+- Rust 业务模块（db / chunker / scanner）扩展更多 `cargo test`。
 - 前端组件用 Vitest + React Testing Library。
 - E2E 用 Playwright + Tauri WebDriver。
 

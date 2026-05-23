@@ -79,10 +79,7 @@ fn run_rescan(app: &AppHandle) {
 
     let report = {
         let Ok(conn) = state.db.lock() else { return };
-        let Some(root) = crate::db::config_get(&conn, "library_root")
-            .ok()
-            .flatten()
-        else {
+        let Some(root) = crate::db::config_get(&conn, "library_root").ok().flatten() else {
             return;
         };
         match scanner::scan(&conn, Path::new(&root), Some(&covers_dir)) {
@@ -100,6 +97,6 @@ fn is_supported_path(path: &Path) -> bool {
     };
     matches!(
         ext.to_ascii_lowercase().as_str(),
-        "epub" | "txt" | "pdf" | "docx" | "mobi"
+        "epub" | "txt" | "pdf" | "docx" | "mobi" | "azw" | "azw3"
     )
 }

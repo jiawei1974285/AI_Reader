@@ -18,8 +18,8 @@ struct ChatRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
-    /// DeepSeek / Qwen 等支持「关闭思考链」的兼容字段。其他 LLM gateway
-    /// 看不懂会忽略。开启「快速模式」时设为 Some(false)。
+    /// DeepSeek / Qwen 等支持「关闭思考链」的兼容字段。
+    /// 部分 OpenAI-compatible gateway 会拒绝未知字段，所以只在确认支持时发送。
     #[serde(skip_serializing_if = "Option::is_none")]
     enable_thinking: Option<bool>,
 }
@@ -34,21 +34,186 @@ struct ChatChoice {
     message: ChatMessage,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ChapterEntity {
+    pub name: String,
+    pub kind: String,
+    pub summary: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 struct AiConfig {
     base_url: String,
     api_key: String,
     chat_model: String,
     #[serde(default)]
     temperature: Option<f32>,
-    /// 用户在 AI 设置面板里勾「快速模式」(无思考链) 时为 true。默认为
-    /// true，因为绝大部分阅读助手场景不需要 reasoning。
+    /// 用户在 AI 设置面板里勾「快速模式」(无思考链) 时为 true。
     #[serde(default = "default_fast_mode")]
     fast_mode: bool,
 }
 
 fn default_fast_mode() -> bool {
     true
+}
+
+fn thinking_toggle_for(cfg: &AiConfig) -> Option<bool> {
+    if !cfg.fast_mode {
+        return None;
+    }
+
+    let base_url = cfg.base_url.to_ascii_lowercase();
+    let model = cfg.chat_model.to_ascii_lowercase();
+    let supported = base_url.contains("deepseek")
+        || base_url.contains("dashscope")
+        || base_url.contains("aliyuncs")
+        || base_url.contains("siliconflow")
+        || model.contains("deepseek")
+        || model.contains("qwen");
+
+    if supported {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn validate_ai_config_fields(cfg: &AiConfig) -> Result<(), String> {
+    if cfg.base_url.trim().is_empty() {
+        return Err("base_url 未配置".to_string());
+    }
+    if cfg.api_key.trim().is_empty() {
+        return Err("api_key 未配置".to_string());
+    }
+    if cfg.chat_model.trim().is_empty() {
+        return Err("chat_model 未配置".to_string());
+    }
+    Ok(())
+}
+
+fn chat_completions_url(base_url: &str) -> String {
+    format!(
+        "{}/v1/chat/completions",
+        base_url.trim().trim_end_matches('/')
+    )
+}
+
+fn format_api_error(status: reqwest::StatusCode, body: &str) -> String {
+    let hint = match status.as_u16() {
+        401 => "请检查 API Key 是否正确、是否已启用、是否复制完整。",
+        403 => "请检查当前 API Key 是否有访问该模型的权限。",
+        404 => "请检查 Base URL 和模型名称是否正确。",
+        429 => "请求过于频繁或额度不足，请稍后再试或检查账户额度。",
+        _ => "请检查接口配置和网络状态。",
+    };
+    let short = sanitize_api_error_body(body);
+    if short.is_empty() {
+        format!("API 错误 {status}: {hint}")
+    } else {
+        format!("API 错误 {status}: {hint}\n{short}")
+    }
+}
+
+fn sanitize_api_error_body(body: &str) -> String {
+    let mut text = body.replace('\n', " ").replace('\r', " ");
+    while let Some(start) = text.find("sk-") {
+        let tail = text[start..]
+            .find(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+            .map(|len| start + len)
+            .unwrap_or_else(|| text.len());
+        text.replace_range(start..tail, "[API_KEY]");
+    }
+    text = text.replace("Your api key", "API Key");
+    text.chars().take(500).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn builds_chat_completions_url_without_duplicate_slashes() {
+        assert_eq!(
+            chat_completions_url("https://api.deepseek.com/"),
+            "https://api.deepseek.com/v1/chat/completions"
+        );
+    }
+
+    #[test]
+    fn validates_model_test_config_before_network_request() {
+        let cfg = AiConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            api_key: "sk-test".to_string(),
+            chat_model: "deepseek-chat".to_string(),
+            temperature: None,
+            fast_mode: true,
+        };
+
+        assert!(validate_ai_config_fields(&cfg).is_ok());
+
+        let missing_model = AiConfig {
+            chat_model: "  ".to_string(),
+            ..cfg
+        };
+        assert!(validate_ai_config_fields(&missing_model)
+            .unwrap_err()
+            .contains("chat_model"));
+    }
+
+    #[test]
+    fn thinking_toggle_only_serializes_for_known_supported_models() {
+        let deepseek = AiConfig {
+            base_url: "https://api.deepseek.com".to_string(),
+            api_key: "sk-test".to_string(),
+            chat_model: "deepseek-chat".to_string(),
+            temperature: None,
+            fast_mode: true,
+        };
+        assert_eq!(thinking_toggle_for(&deepseek), Some(false));
+
+        let openai = AiConfig {
+            base_url: "https://api.openai.com".to_string(),
+            chat_model: "gpt-4o-mini".to_string(),
+            ..deepseek.clone()
+        };
+        assert_eq!(thinking_toggle_for(&openai), None);
+
+        let disabled = AiConfig {
+            fast_mode: false,
+            ..deepseek
+        };
+        assert_eq!(thinking_toggle_for(&disabled), None);
+    }
+
+    #[test]
+    fn formats_api_errors_without_leaking_api_key() {
+        let body = r#"{"error":{"message":"Authentication Fails, Your api key: sk-secret-tail is invalid!","type":"authentication_error"}}"#;
+
+        let formatted = format_api_error(reqwest::StatusCode::UNAUTHORIZED, body);
+
+        assert!(formatted.contains("API 错误 401 Unauthorized"));
+        assert!(formatted.contains("请检查 API Key"));
+        assert!(!formatted.contains("sk-secret-tail"));
+        assert!(!formatted.contains("Your api key"));
+    }
+
+    #[test]
+    fn parses_entities_from_fenced_json_reply() {
+        let reply = r#"```json
+[
+  {"name":"叶文洁","kind":"person","summary":"天体物理学家，与红岸基地有关。"},
+  {"name":"红岸基地","kind":"place","summary":"位于山区的秘密工程基地。"}
+]
+```"#;
+
+        let entities = parse_entity_reply(reply).expect("entity JSON should parse");
+
+        assert_eq!(entities.len(), 2);
+        assert_eq!(entities[0].name, "叶文洁");
+        assert_eq!(entities[0].kind, "person");
+        assert_eq!(entities[1].name, "红岸基地");
+        assert_eq!(entities[1].kind, "place");
+    }
 }
 
 fn load_config(state: &State<'_, AppState>) -> Result<AiConfig, String> {
@@ -58,8 +223,8 @@ fn load_config(state: &State<'_, AppState>) -> Result<AiConfig, String> {
         .ok_or_else(|| {
             "AI 设置未配置：请在设置中填入 base_url / api_key / chat_model".to_string()
         })?;
-    let cfg: AiConfig = serde_json::from_str(&raw)
-        .map_err(|e| format!("AI 设置 JSON 解析失败: {e}"))?;
+    let cfg: AiConfig =
+        serde_json::from_str(&raw).map_err(|e| format!("AI 设置 JSON 解析失败: {e}"))?;
     if cfg.base_url.trim().is_empty() {
         return Err("base_url 未配置".to_string());
     }
@@ -83,16 +248,13 @@ pub async fn ai_chat(
 ) -> Result<String, String> {
     let cfg = load_config(&state)?;
 
-    let url = format!(
-        "{}/v1/chat/completions",
-        cfg.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/chat/completions", cfg.base_url.trim_end_matches('/'));
     let body = ChatRequest {
         model: &cfg.chat_model,
         messages: &messages,
         stream: false,
         temperature: cfg.temperature,
-        enable_thinking: if cfg.fast_mode { Some(false) } else { None },
+        enable_thinking: thinking_toggle_for(&cfg),
     };
 
     let client = reqwest::Client::builder()
@@ -111,7 +273,7 @@ pub async fn ai_chat(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("API 错误 {status}: {text}"));
+        return Err(format_api_error(status, &text));
     }
 
     let parsed: ChatResponse = resp
@@ -124,6 +286,173 @@ pub async fn ai_chat(
         .next()
         .map(|c| strip_thinking(&c.message.content))
         .ok_or_else(|| "API 返回空响应".to_string())
+}
+
+#[tauri::command]
+pub async fn test_ai_model(
+    base_url: String,
+    api_key: String,
+    chat_model: String,
+    temperature: Option<f32>,
+    fast_mode: Option<bool>,
+) -> Result<String, String> {
+    let cfg = AiConfig {
+        base_url,
+        api_key,
+        chat_model,
+        temperature,
+        fast_mode: fast_mode.unwrap_or_else(default_fast_mode),
+    };
+    validate_ai_config_fields(&cfg)?;
+
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: "You are a connection tester. Reply with exactly OK.".to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: "Reply OK to confirm this model is reachable.".to_string(),
+        },
+    ];
+    let body = ChatRequest {
+        model: cfg.chat_model.trim(),
+        messages: &messages,
+        stream: false,
+        temperature: cfg.temperature,
+        enable_thinking: thinking_toggle_for(&cfg),
+    };
+
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .map_err(|e| format!("HTTP client init failed: {e}"))?;
+
+    let resp = client
+        .post(chat_completions_url(&cfg.base_url))
+        .bearer_auth(cfg.api_key.trim())
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| format!("请求失败: {e}"))?;
+
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        return Err(format_api_error(status, &text));
+    }
+
+    let parsed: ChatResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("响应解析失败: {e}"))?;
+    let reply = parsed
+        .choices
+        .into_iter()
+        .next()
+        .map(|c| strip_thinking(&c.message.content))
+        .unwrap_or_default();
+
+    if reply.trim().is_empty() {
+        return Err("模型已连接，但返回了空响应".to_string());
+    }
+    Ok(format!("连接成功：{} 已响应", cfg.chat_model.trim()))
+}
+
+#[tauri::command]
+pub async fn ai_extract_entities(
+    chapter_label: String,
+    chapter_text: String,
+    state: State<'_, AppState>,
+) -> Result<Vec<ChapterEntity>, String> {
+    let text = chapter_text.trim();
+    if text.is_empty() {
+        return Ok(Vec::new());
+    }
+    let clipped = truncate_chars(text, 12_000);
+    let prompt = format!(
+        "请从下面章节中提取重要的人名和地名。\n\
+         只返回 JSON 数组，不要 Markdown，不要解释。\n\
+         每一项格式必须是：{{\"name\":\"名称\",\"kind\":\"person 或 place\",\"summary\":\"30-80字中文简介，说明本章中它是谁/是什么/在哪里/为何重要\"}}\n\
+         规则：\n\
+         - 只提取本章真实出现过的名称。\n\
+         - 人名包含角色、作者明显提到的人物；地名包含国家、城市、建筑、机构、基地、星球等地点或地点性组织。\n\
+         - 合并同一实体的别名，name 用正文里最常见的写法。\n\
+         - 最多返回 24 项，按重要性排序。\n\n\
+         章节：{chapter_label}\n\n\
+         正文：\n{clipped}"
+    );
+
+    let messages = vec![
+        ChatMessage {
+            role: "system".to_string(),
+            content: "你是一个严谨的文学阅读助手，擅长从章节中抽取人物和地点。".to_string(),
+        },
+        ChatMessage {
+            role: "user".to_string(),
+            content: prompt,
+        },
+    ];
+    let reply = ai_chat(messages, state).await?;
+    parse_entity_reply(&reply)
+}
+
+fn parse_entity_reply(reply: &str) -> Result<Vec<ChapterEntity>, String> {
+    let json = extract_json_array(reply).ok_or_else(|| {
+        format!(
+            "AI 没有返回可解析的实体 JSON：{}",
+            reply.chars().take(300).collect::<String>()
+        )
+    })?;
+    let mut entities: Vec<ChapterEntity> = serde_json::from_str(&json).map_err(|e| {
+        format!(
+            "实体 JSON 解析失败: {e}; 原文: {}",
+            json.chars().take(500).collect::<String>()
+        )
+    })?;
+    for e in &mut entities {
+        e.name = e.name.trim().to_string();
+        e.summary = e.summary.trim().to_string();
+        e.kind = match e.kind.trim().to_ascii_lowercase().as_str() {
+            "person" | "人物" | "人名" => "person".to_string(),
+            "place" | "location" | "地名" | "地点" => "place".to_string(),
+            _ => "place".to_string(),
+        };
+    }
+    entities.retain(|e| !e.name.is_empty() && !e.summary.is_empty());
+    entities.sort_by(|a, b| a.name.cmp(&b.name));
+    entities.dedup_by(|a, b| a.name == b.name && a.kind == b.kind);
+    entities.truncate(24);
+    Ok(entities)
+}
+
+fn extract_json_array(reply: &str) -> Option<String> {
+    let trimmed = reply.trim();
+    let unfenced = strip_json_code_fence(trimmed);
+    if unfenced.starts_with('[') && unfenced.ends_with(']') {
+        return Some(unfenced);
+    }
+    let start = trimmed.find('[')?;
+    let end = trimmed.rfind(']')?;
+    if end <= start {
+        return None;
+    }
+    Some(trimmed[start..=end].trim().to_string())
+}
+
+fn strip_json_code_fence(s: &str) -> String {
+    let t = s.trim();
+    let t = t.strip_prefix("```json").unwrap_or(t);
+    let t = t.strip_prefix("```").unwrap_or(t);
+    let t = t.strip_suffix("```").unwrap_or(t);
+    t.trim().to_string()
+}
+
+fn truncate_chars(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    s.chars().take(max_chars).collect::<String>()
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -378,7 +707,8 @@ fn strip_thinking(s: &str) -> String {
             .or_else(|| rest[after_open..].find("</thinking>"));
         match close {
             Some(rel) => {
-                let after_close = after_open + rel
+                let after_close = after_open
+                    + rel
                     + if rest[after_open + rel..].starts_with("</thinking>") {
                         "</thinking>".len()
                     } else {
@@ -404,16 +734,13 @@ async fn stream_chat_to_events(
     session_id: &str,
     app: AppHandle,
 ) -> Result<(), String> {
-    let url = format!(
-        "{}/v1/chat/completions",
-        cfg.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/chat/completions", cfg.base_url.trim_end_matches('/'));
     let body = StreamingChatRequest {
         model: &cfg.chat_model,
         messages,
         stream: true,
         temperature: cfg.temperature,
-        enable_thinking: if cfg.fast_mode { Some(false) } else { None },
+        enable_thinking: thinking_toggle_for(cfg),
     };
 
     let client = reqwest::Client::builder()
@@ -432,7 +759,7 @@ async fn stream_chat_to_events(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        let msg = format!("API 错误 {status}: {text}");
+        let msg = format_api_error(status, &text);
         let _ = app.emit(
             "chat-delta",
             ChatDelta {
@@ -598,16 +925,22 @@ pub async fn ai_index_book(
     let bid = book_id;
 
     let result = tokio::task::spawn_blocking(move || {
-        index::index_book(book_id, &book_path, cache_dir, &db_path, |current, total| {
-            let _ = app_emit.emit(
-                "index-progress",
-                IndexProgress {
-                    book_id: bid,
-                    current,
-                    total,
-                },
-            );
-        })
+        index::index_book(
+            book_id,
+            &book_path,
+            cache_dir,
+            &db_path,
+            |current, total| {
+                let _ = app_emit.emit(
+                    "index-progress",
+                    IndexProgress {
+                        book_id: bid,
+                        current,
+                        total,
+                    },
+                );
+            },
+        )
     })
     .await
     .map_err(|e| e.to_string())?;
@@ -628,14 +961,7 @@ pub async fn ai_index_book(
             // Record error state
             if let Ok((_, db_path)) = cache_and_db_paths(&app) {
                 if let Ok(conn) = rusqlite::Connection::open(&db_path) {
-                    let _ = db::set_index_status(
-                        &conn,
-                        book_id,
-                        "error",
-                        0,
-                        None,
-                        Some(&e),
-                    );
+                    let _ = db::set_index_status(&conn, book_id, "error", 0, None, Some(&e));
                 }
             }
             Err(e)
@@ -659,8 +985,7 @@ pub async fn ai_summarize_highlights(
             .into_iter()
             .find(|b| b.id == book_id)
             .ok_or_else(|| "找不到这本书".to_string())?;
-        let hs = db::list_highlights_by_book(&conn, book_id)
-            .map_err(|e| e.to_string())?;
+        let hs = db::list_highlights_by_book(&conn, book_id).map_err(|e| e.to_string())?;
         (book.title, book.author, hs)
     };
 
@@ -838,9 +1163,7 @@ pub async fn ai_classify_books(
                 for (i, cat) in cats.iter().enumerate() {
                     if let Some(b) = batch.get(i) {
                         let normalized = normalize_category(cat);
-                        if let Err(_e) =
-                            db::set_book_category(&conn, b.id, &normalized)
-                        {
+                        if let Err(_e) = db::set_book_category(&conn, b.id, &normalized) {
                             failed += 1;
                         } else {
                             classified += 1;
@@ -933,8 +1256,7 @@ pub async fn ai_recommend_books(
                 // fall back to bare recommendations so the panel still
                 // shows something useful.
                 let conn = state.db.lock().map_err(|err| err.to_string())?;
-                recommend::recommend(&conn, anchor_book_id, top_k)
-                    .map_err(|_| e)
+                recommend::recommend(&conn, anchor_book_id, top_k).map_err(|_| e)
             }
         }
     } else {
@@ -1017,16 +1339,13 @@ pub async fn ai_chat_rag(
         content: question,
     });
 
-    let url = format!(
-        "{}/v1/chat/completions",
-        cfg.base_url.trim_end_matches('/')
-    );
+    let url = format!("{}/v1/chat/completions", cfg.base_url.trim_end_matches('/'));
     let body = ChatRequest {
         model: &cfg.chat_model,
         messages: &messages,
         stream: false,
         temperature: cfg.temperature,
-        enable_thinking: if cfg.fast_mode { Some(false) } else { None },
+        enable_thinking: thinking_toggle_for(&cfg),
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(90))
@@ -1042,7 +1361,7 @@ pub async fn ai_chat_rag(
     if !resp.status().is_success() {
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        return Err(format!("API 错误 {status}: {text}"));
+        return Err(format_api_error(status, &text));
     }
     let parsed: ChatResponse = resp
         .json()

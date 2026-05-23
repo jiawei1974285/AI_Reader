@@ -120,7 +120,18 @@ function wrapOne(root: HTMLElement, hl: Highlight) {
     if (queryNonWS > 0 && nonWS >= Math.max(1, Math.floor(queryNonWS * 0.8))) {
       const range = rangeFromOffsets(root, located.start, located.end);
       if (range) wrapRange(range, hl);
+      return;
     }
+  }
+
+  // Tier 4: layout-character-insensitive match. Some EPUB/MOBI renderers
+  // inject line breaks, NBSPs, or zero-width chars differently between
+  // selection capture and rerender. Build a compact string while preserving
+  // original offsets, then map the match back to the DOM.
+  const compact = findIgnoringLayoutChars(fullText, hl.selected_text);
+  if (compact) {
+    const range = rangeFromOffsets(root, compact.start, compact.end);
+    if (range) wrapRange(range, hl);
   }
 }
 
@@ -182,6 +193,33 @@ function findIgnoringWhitespace(
     }
   }
   return null;
+}
+
+function findIgnoringLayoutChars(
+  haystack: string,
+  query: string,
+): { start: number; end: number } | null {
+  const h = compactWithMap(haystack);
+  const q = compactWithMap(query);
+  if (q.text.length === 0) return null;
+  const idx = h.text.indexOf(q.text);
+  if (idx < 0) return null;
+  const start = h.map[idx];
+  const end = h.map[idx + q.text.length - 1] + 1;
+  if (start == null || end == null || end <= start) return null;
+  return { start, end };
+}
+
+function compactWithMap(s: string): { text: string; map: number[] } {
+  let text = "";
+  const map: number[] = [];
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    if (/[\s\u00a0\u200b\u200c\u200d\ufeff]/.test(ch)) continue;
+    text += ch;
+    map.push(i);
+  }
+  return { text, map };
 }
 
 function wrapRange(range: Range, hl: Highlight) {

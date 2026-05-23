@@ -2,7 +2,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
-use mobi::headers::TextEncoding;
+use mobi::headers::{Encryption, TextEncoding};
 use mobi::Mobi;
 use regex::Regex;
 use std::collections::HashMap;
@@ -168,14 +168,47 @@ fn split_chapters(body: &str) -> Vec<MobiChapter> {
 
     // If pagebreak yielded only one "chapter" but the book is long, slice
     // by character count as a fallback.
-    if chapters.len() <= 1 && body.chars().count() > FALLBACK_CHUNK_CHARS {
-        chapters = chunk_by_chars(body, FALLBACK_CHUNK_CHARS);
+    if chapters.len() <= 1 {
+        let heading_chapters = split_by_headings(body);
+        if heading_chapters.len() > 1 {
+            chapters = heading_chapters;
+        } else if body.chars().count() > FALLBACK_CHUNK_CHARS {
+            chapters = chunk_by_chars(body, FALLBACK_CHUNK_CHARS);
+        }
     }
 
     if chapters.is_empty() {
         chapters.push(MobiChapter {
             label: "全文".to_string(),
             html: body.to_string(),
+        });
+    }
+    chapters
+}
+
+static CHAPTER_HEADING_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?is)<h[1-3]\b[^>]*>.*?</h[1-3]\s*>").unwrap());
+
+fn split_by_headings(body: &str) -> Vec<MobiChapter> {
+    let matches: Vec<_> = CHAPTER_HEADING_RE.find_iter(body).collect();
+    if matches.len() <= 1 {
+        return Vec::new();
+    }
+
+    let mut chapters = Vec::new();
+    for (i, m) in matches.iter().enumerate() {
+        let start = m.start();
+        let end = matches
+            .get(i + 1)
+            .map(|next| next.start())
+            .unwrap_or(body.len());
+        let html = body[start..end].trim();
+        if html.is_empty() {
+            continue;
+        }
+        chapters.push(MobiChapter {
+            label: derive_label(html, i),
+            html: html.to_string(),
         });
     }
     chapters
@@ -249,11 +282,17 @@ fn title_from_path(path: &Path) -> String {
 /// to extract anything to disk.
 fn read_body(path: &Path) -> Result<(String, String, String), String> {
     let m = open(path)?;
+    if m.encryption() != Encryption::No {
+        return Err(
+            "这本书是加密的 AZW/MOBI 文件，当前无法解析正文。请换用无 DRM 的版本后再打开。"
+                .to_string(),
+        );
+    }
     // Don't trust mobi-rs's header-declared encoding — Chinese MOBIs often
     // declare UTF-8 but contain GBK/GB18030 bytes (older Calibre conversions,
     // third-party Kindle tools, etc.). Run chardetng on raw bytes instead.
     let bytes = m.content_as_bytes();
-    let body = decode_content_bytes(&bytes, m.text_encoding());
+    let body = decode_content_bytes(&bytes, m.text_encoding())?;
     let title = {
         let t = m.title();
         if t.trim().is_empty() {
@@ -291,11 +330,7 @@ fn read_body(path: &Path) -> Result<(String, String, String), String> {
 /// least in extension ranges (0x8300+, Ext-A) wins.
 ///
 /// `header_hint` is only logged for diagnostics — we don't trust it.
-fn decode_content_bytes(bytes: &[u8], header_hint: TextEncoding) -> String {
-    if let Ok(s) = std::str::from_utf8(bytes) {
-        return s.to_string();
-    }
-
+fn decode_content_bytes(bytes: &[u8], header_hint: TextEncoding) -> Result<String, String> {
     let mut detector = EncodingDetector::new();
     detector.feed(bytes, true);
     // `cn` TLD biases toward GBK/GB18030 over Latin-1.
@@ -354,7 +389,15 @@ fn decode_content_bytes(bytes: &[u8], header_hint: TextEncoding) -> String {
         winner_score
     );
 
-    winner_text
+    let cleaned = sanitize_sparse_decode_markers(&winner_text);
+    if decoded_body_is_garbage(&cleaned) {
+        return Err(
+            "这本书的 MOBI/AZW 正文压缩格式当前无法可靠解析，已停止显示乱码。请换用 EPUB、TXT 或无 DRM 的新版 AZW3。"
+                .to_string(),
+        );
+    }
+
+    Ok(cleaned)
 }
 
 /// Quality score for a decoded text candidate. Higher = better.
@@ -395,10 +438,56 @@ fn decode_quality_score(s: &str) -> f64 {
         // Other Unicode chars (punctuation, fullwidth, etc.) score neutral
     }
 
-    (common as f64 / total_f) * 1.2
-        + (ascii as f64 / total_f) * 0.5
+    (common as f64 / total_f) * 1.2 + (ascii as f64 / total_f) * 0.5
         - (extended as f64 / total_f) * 1.5
         - (fffd as f64 / total_f) * 1.0
+}
+
+fn sanitize_sparse_decode_markers(s: &str) -> String {
+    let total = s.chars().count();
+    if total == 0 {
+        return String::new();
+    }
+    let bad = s.chars().filter(|c| matches!(*c, '\u{FFFD}' | '□')).count();
+    if bad > 3 && (bad as f64 / total as f64) > 0.005 {
+        return s.to_string();
+    }
+    s.chars()
+        .filter(|c| !matches!(*c, '\u{FFFD}' | '□'))
+        .collect()
+}
+
+fn decoded_body_is_garbage(s: &str) -> bool {
+    let sample: String = s.chars().take(50_000).collect();
+    let total = sample.chars().count();
+    if total < 200 {
+        return false;
+    }
+
+    let bad = sample
+        .chars()
+        .filter(|c| matches!(*c, '\u{FFFD}' | '□'))
+        .count();
+    let controls = sample
+        .chars()
+        .filter(|c| c.is_control() && !matches!(*c, '\n' | '\r' | '\t'))
+        .count();
+    let common_cjk = sample
+        .chars()
+        .filter(|c| ('\u{4E00}'..='\u{82FF}').contains(c))
+        .count();
+    let ascii = sample.chars().filter(|c| c.is_ascii()).count();
+    let has_markup = sample.contains("<html")
+        || sample.contains("<body")
+        || sample.contains("<p")
+        || sample.contains("<div");
+
+    let total_f = total as f64;
+    let bad_ratio = bad as f64 / total_f;
+    let control_ratio = controls as f64 / total_f;
+    let readable_ratio = (common_cjk + ascii) as f64 / total_f;
+
+    bad_ratio > 0.02 || control_ratio > 0.02 || (!has_markup && readable_ratio < 0.45)
 }
 
 /// Map of `recindex` (1-based, as it appears in MOBI HTML) to a fully
@@ -451,9 +540,8 @@ static IMG_TAG_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?is)<img\b([^>]*?)/?>"#).unwrap());
 static ATTR_RECINDEX_RE: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r#"(?is)\brecindex\s*=\s*["']?0*(\d+)["']?"#).unwrap());
-static ATTR_KINDLE_EMBED_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?is)\bsrc\s*=\s*["']kindle:embed:0*(\d+)[^"']*["']"#).unwrap()
-});
+static ATTR_KINDLE_EMBED_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#"(?is)\bsrc\s*=\s*["']kindle:embed:0*(\d+)[^"']*["']"#).unwrap());
 
 fn inline_mobi_images(body: &str, images: &HashMap<usize, String>) -> String {
     // Track stats so we can diagnose mis-rendering MOBIs from the dev console
@@ -551,7 +639,9 @@ pub fn read_mobi_chapter(path: String, spine_index: usize) -> Result<EpubPreview
         let view = cached_or_parse(p)?;
         let total = view.chapters.len();
         if spine_index >= total {
-            return Err(format!("spine_index {spine_index} out of range (0..{total})"));
+            return Err(format!(
+                "spine_index {spine_index} out of range (0..{total})"
+            ));
         }
         let ch = &view.chapters[spine_index];
 
@@ -621,4 +711,42 @@ fn extract_metadata_inner(path: &Path) -> Result<(String, String), String> {
     };
     let author = m.author().unwrap_or_default();
     Ok((title, author))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn split_chapters_uses_headings_when_pagebreaks_are_missing() {
+        let body = r#"
+            <h1>第一章</h1><p>alpha</p>
+            <h1>第二章</h1><p>beta</p>
+            <h2>第三章</h2><p>gamma</p>
+        "#;
+
+        let chapters = split_chapters(body);
+
+        assert_eq!(chapters.len(), 3);
+        assert!(chapters[0].html.contains("alpha"));
+        assert!(chapters[1].html.contains("beta"));
+        assert!(chapters[2].html.contains("gamma"));
+    }
+
+    #[test]
+    fn sparse_decode_markers_are_removed() {
+        let text = "纳兰小姐问道：谁教你是汉人？\u{FFFD}教你的\u{FFFD}";
+
+        let cleaned = sanitize_sparse_decode_markers(text);
+
+        assert_eq!(cleaned, "纳兰小姐问道：谁教你是汉人？教你的");
+    }
+
+    #[test]
+    fn dense_decode_markers_are_treated_as_garbage() {
+        let text = "A\u{FFFD}B□C".repeat(200);
+
+        assert_eq!(sanitize_sparse_decode_markers(&text), text);
+        assert!(decoded_body_is_garbage(&text));
+    }
 }

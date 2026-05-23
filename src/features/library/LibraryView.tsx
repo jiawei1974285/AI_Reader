@@ -5,6 +5,7 @@ import {
   ipc,
   isTauriRuntime,
   type Book,
+  type BookmarkWithBook,
   type ClassifyProgress,
 } from "@/lib/ipc";
 import { BookCard } from "./BookCard";
@@ -33,17 +34,31 @@ const CATEGORY_ORDER = [
   "其他",
 ];
 
-const FORMAT_ORDER: Book["format"][] = ["epub", "pdf", "mobi", "docx", "txt"];
+const FORMAT_ORDER: Book["format"][] = [
+  "epub",
+  "pdf",
+  "mobi",
+  "azw",
+  "azw3",
+  "docx",
+  "txt",
+];
 const FORMAT_LABEL: Record<Book["format"], string> = {
   epub: "EPUB",
   pdf: "PDF",
   mobi: "MOBI",
+  azw: "AZW",
+  azw3: "AZW3",
   docx: "DOCX",
   txt: "TXT",
 };
 
 type Props = {
-  onOpenBook: (book: Book) => void;
+  onOpenBook: (
+    book: Book,
+    initialSpine?: number,
+    initialScrollY?: number,
+  ) => void;
   onOpenNotes: () => void;
   onOpenMusic: () => void;
   onOpenStats: () => void;
@@ -59,11 +74,14 @@ export function LibraryView({
 }: Props) {
   const [root, setRoot] = useState<string | null>(null);
   const [books, setBooks] = useState<Book[]>([]);
+  const [bookmarks, setBookmarks] = useState<BookmarkWithBook[]>([]);
   const [scanning, setScanning] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastReport, setLastReport] = useState<string | null>(null);
   const [recommendOpen, setRecommendOpen] = useState(false);
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [bookmarkQuery, setBookmarkQuery] = useState("");
   const [activeCategory, setActiveCategory] = useState<string | null>(
     () => localStorage.getItem("library_category") || null,
   );
@@ -96,7 +114,8 @@ export function LibraryView({
   }, [sortKey]);
 
   useEffect(() => {
-    if (activeCategory) localStorage.setItem("library_category", activeCategory);
+    if (activeCategory)
+      localStorage.setItem("library_category", activeCategory);
     else localStorage.removeItem("library_category");
   }, [activeCategory]);
 
@@ -129,6 +148,7 @@ export function LibraryView({
         if (r) {
           const list = await ipc.listBooks();
           setBooks(list);
+          setBookmarks(await ipc.listRecentBookmarks(500));
           ipc.startLibraryWatcher().catch(() => {});
         }
       } catch (e) {
@@ -155,6 +175,7 @@ export function LibraryView({
         }
         try {
           setBooks(await ipc.listBooks());
+          setBookmarks(await ipc.listRecentBookmarks(500));
         } catch {
           /* best effort */
         }
@@ -206,6 +227,7 @@ export function LibraryView({
       if (report.removed > 0) parts.push(`移除 ${report.removed}`);
       setLastReport(parts.join(" · "));
       setBooks(await ipc.listBooks());
+      setBookmarks(await ipc.listRecentBookmarks(500));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -225,6 +247,7 @@ export function LibraryView({
       if (report.failed > 0) parts.push(`失败 ${report.failed}`);
       setLastReport(parts.join(" · "));
       setBooks(await ipc.listBooks());
+      setBookmarks(await ipc.listRecentBookmarks(500));
     } catch (e) {
       setError(String(e));
     } finally {
@@ -232,87 +255,83 @@ export function LibraryView({
     }
   }
 
-  const {
-    displayedBooks,
-    categoryCounts,
-    formatCounts,
-    totalsAfterSearch,
-  } = useMemo(() => {
-    // First apply the search filter (shared across both facets), so counts
-    // shown on each facet's chip reflect "matches if I click this".
-    const q = searchQuery.trim().toLowerCase();
-    const searched = q
-      ? books.filter((b) => {
-          const t = b.title?.toLowerCase() ?? "";
-          const a = b.author?.toLowerCase() ?? "";
-          return t.includes(q) || a.includes(q);
-        })
-      : books.slice();
+  const { displayedBooks, categoryCounts, formatCounts, totalsAfterSearch } =
+    useMemo(() => {
+      // First apply the search filter (shared across both facets), so counts
+      // shown on each facet's chip reflect "matches if I click this".
+      const q = searchQuery.trim().toLowerCase();
+      const searched = q
+        ? books.filter((b) => {
+            const t = b.title?.toLowerCase() ?? "";
+            const a = b.author?.toLowerCase() ?? "";
+            return t.includes(q) || a.includes(q);
+          })
+        : books.slice();
 
-    // Dependent counts (facet aware): each facet's counts are computed
-    // *after* the OTHER facet has been applied, so the number on each chip
-    // is honest about what clicking it would yield.
-    const catFiltered =
-      activeFormat === null
-        ? searched
-        : searched.filter((b) => b.format === activeFormat);
-    const fmtFiltered =
-      activeCategory === null
-        ? searched
-        : searched.filter((b) => {
-            const k = b.category && b.category.trim() ? b.category : "未分类";
-            return k === activeCategory;
-          });
+      // Dependent counts (facet aware): each facet's counts are computed
+      // *after* the OTHER facet has been applied, so the number on each chip
+      // is honest about what clicking it would yield.
+      const catFiltered =
+        activeFormat === null
+          ? searched
+          : searched.filter((b) => b.format === activeFormat);
+      const fmtFiltered =
+        activeCategory === null
+          ? searched
+          : searched.filter((b) => {
+              const k = b.category && b.category.trim() ? b.category : "未分类";
+              return k === activeCategory;
+            });
 
-    const catCounts = new Map<string, number>();
-    for (const b of catFiltered) {
-      const k = b.category && b.category.trim() ? b.category : "未分类";
-      catCounts.set(k, (catCounts.get(k) ?? 0) + 1);
-    }
-    const fmtCounts = new Map<Book["format"], number>();
-    for (const b of fmtFiltered) {
-      fmtCounts.set(b.format, (fmtCounts.get(b.format) ?? 0) + 1);
-    }
-
-    // Then both filters together for the actual grid.
-    let result = searched;
-    if (activeCategory !== null) {
-      result = result.filter((b) => {
+      const catCounts = new Map<string, number>();
+      for (const b of catFiltered) {
         const k = b.category && b.category.trim() ? b.category : "未分类";
-        return k === activeCategory;
-      });
-    }
-    if (activeFormat !== null) {
-      result = result.filter((b) => b.format === activeFormat);
-    }
-
-    result.sort((a, b) => {
-      switch (sortKey) {
-        case "title_asc":
-          return (a.title || "").localeCompare(b.title || "", "zh-Hans-CN");
-        case "author_asc":
-          return (a.author || "").localeCompare(b.author || "", "zh-Hans-CN");
-        case "read_desc": {
-          const av = a.last_read_at ?? 0;
-          const bv = b.last_read_at ?? 0;
-          if (av === 0 && bv === 0) return b.added_at - a.added_at;
-          if (av === 0) return 1;
-          if (bv === 0) return -1;
-          return bv - av;
-        }
-        case "added_desc":
-        default:
-          return b.added_at - a.added_at;
+        catCounts.set(k, (catCounts.get(k) ?? 0) + 1);
       }
-    });
+      const fmtCounts = new Map<Book["format"], number>();
+      for (const b of fmtFiltered) {
+        fmtCounts.set(b.format, (fmtCounts.get(b.format) ?? 0) + 1);
+      }
 
-    return {
-      displayedBooks: result,
-      categoryCounts: catCounts,
-      formatCounts: fmtCounts,
-      totalsAfterSearch: searched.length,
-    };
-  }, [books, activeCategory, activeFormat, searchQuery, sortKey]);
+      // Then both filters together for the actual grid.
+      let result = searched;
+      if (activeCategory !== null) {
+        result = result.filter((b) => {
+          const k = b.category && b.category.trim() ? b.category : "未分类";
+          return k === activeCategory;
+        });
+      }
+      if (activeFormat !== null) {
+        result = result.filter((b) => b.format === activeFormat);
+      }
+
+      result.sort((a, b) => {
+        switch (sortKey) {
+          case "title_asc":
+            return (a.title || "").localeCompare(b.title || "", "zh-Hans-CN");
+          case "author_asc":
+            return (a.author || "").localeCompare(b.author || "", "zh-Hans-CN");
+          case "read_desc": {
+            const av = a.last_read_at ?? 0;
+            const bv = b.last_read_at ?? 0;
+            if (av === 0 && bv === 0) return b.added_at - a.added_at;
+            if (av === 0) return 1;
+            if (bv === 0) return -1;
+            return bv - av;
+          }
+          case "added_desc":
+          default:
+            return b.added_at - a.added_at;
+        }
+      });
+
+      return {
+        displayedBooks: result,
+        categoryCounts: catCounts,
+        formatCounts: fmtCounts,
+        totalsAfterSearch: searched.length,
+      };
+    }, [books, activeCategory, activeFormat, searchQuery, sortKey]);
 
   const orderedCategories = useMemo(() => {
     const out: string[] = [];
@@ -343,6 +362,44 @@ export function LibraryView({
       .slice(0, 6);
   }, [books]);
 
+  const filteredBookmarks = useMemo(() => {
+    const q = bookmarkQuery.trim().toLowerCase();
+    if (!q) return bookmarks;
+    return bookmarks.filter((bookmark) => {
+      const haystack = [
+        bookmark.book_title,
+        bookmark.book_author,
+        bookmark.label,
+        bookmark.excerpt,
+      ]
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(q);
+    });
+  }, [bookmarks, bookmarkQuery]);
+
+  function openBookmark(bookmark: BookmarkWithBook) {
+    const existing = books.find((book) => book.id === bookmark.book_id);
+    const book =
+      existing ??
+      ({
+        id: bookmark.book_id,
+        file_path: bookmark.book_path,
+        format: bookmark.book_format as Book["format"],
+        title: bookmark.book_title,
+        author: bookmark.book_author,
+        added_at: bookmark.created_at,
+        file_size: 0,
+        file_modified: 0,
+        category: "",
+        last_read_at: bookmark.created_at,
+        cover_path: null,
+        read_time_ms: 0,
+      } satisfies Book);
+    setBookmarksOpen(false);
+    onOpenBook(book, bookmark.spine_index, bookmark.scroll_y);
+  }
+
   if (loading) {
     return (
       <div className="app-frame flex items-center justify-center text-sm studio-subtle">
@@ -360,7 +417,10 @@ export function LibraryView({
             选择一个文件夹作为你的本地书库
           </p>
         </div>
-        <button onClick={pickRoot} className="studio-button studio-button-primary">
+        <button
+          onClick={pickRoot}
+          className="studio-button studio-button-primary"
+        >
           导入书库
         </button>
         {error && (
@@ -380,7 +440,10 @@ export function LibraryView({
               本地优先
             </span>
           </div>
-          <p className="text-xs studio-subtle truncate max-w-2xl mt-1" title={root}>
+          <p
+            className="text-xs studio-subtle truncate max-w-2xl mt-1"
+            title={root}
+          >
             {root} · {books.length} 本{lastReport ? ` · ${lastReport}` : ""}
           </p>
         </div>
@@ -405,8 +468,18 @@ export function LibraryView({
               </option>
             ))}
           </select>
-          <button onClick={() => setRecommendOpen(true)} className="studio-button">
+          <button
+            onClick={() => setRecommendOpen(true)}
+            className="studio-button"
+          >
             推荐
+          </button>
+          <button
+            onClick={() => setBookmarksOpen(true)}
+            className="studio-button"
+            title="查看已保存的阅读书签"
+          >
+            书签{bookmarks.length > 0 ? ` · ${bookmarks.length}` : ""}
           </button>
           <button onClick={onOpenNotes} className="studio-button">
             笔记
@@ -420,7 +493,11 @@ export function LibraryView({
           <button onClick={onOpenAiSettings} className="studio-button">
             AI 设置
           </button>
-          <button onClick={rescan} disabled={scanning} className="studio-button">
+          <button
+            onClick={rescan}
+            disabled={scanning}
+            className="studio-button"
+          >
             {scanning ? "扫描中" : "重新扫描"}
           </button>
           <button
@@ -576,6 +653,81 @@ export function LibraryView({
           }}
           onClose={() => setRecommendOpen(false)}
         />
+      )}
+
+      {bookmarksOpen && (
+        <div className="absolute inset-0 z-40 flex justify-end bg-[var(--color-ink)]/12">
+          <button
+            className="flex-1 cursor-default"
+            aria-label="关闭书签"
+            onClick={() => setBookmarksOpen(false)}
+          />
+          <aside className="h-full w-[26rem] max-w-[92vw] border-l border-[var(--color-paper-edge)] bg-[var(--color-paper)] shadow-2xl flex flex-col">
+            <div className="px-5 py-4 border-b border-[var(--color-paper-edge)] flex items-start justify-between gap-3">
+              <div className="min-w-0">
+                <h2 className="studio-title text-xl leading-tight">书签</h2>
+                <p className="text-xs studio-subtle mt-1">
+                  {bookmarks.length} 个保存的位置
+                </p>
+              </div>
+              <button
+                onClick={() => setBookmarksOpen(false)}
+                className="studio-icon-button"
+                aria-label="关闭书签"
+              >
+                ×
+              </button>
+            </div>
+
+            <div className="px-5 py-3 border-b border-[var(--color-paper-edge)]">
+              <input
+                type="search"
+                value={bookmarkQuery}
+                onChange={(e) => setBookmarkQuery(e.target.value)}
+                placeholder="搜索书名、章节、摘录"
+                className="studio-input text-sm w-full"
+              />
+            </div>
+
+            <div className="flex-1 overflow-auto px-4 py-4">
+              {filteredBookmarks.length === 0 ? (
+                <div className="text-sm studio-subtle text-center py-12">
+                  {bookmarks.length === 0 ? "还没有书签" : "没有匹配的书签"}
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {filteredBookmarks.map((bookmark) => (
+                    <button
+                      key={bookmark.id}
+                      onClick={() => openBookmark(bookmark)}
+                      className="w-full text-left px-3 py-3 rounded border border-[var(--color-paper-edge)] bg-[var(--color-paper-soft)] hover:border-[var(--color-accent)]/60 hover:shadow-sm transition"
+                      title={`${bookmark.book_title} · ${bookmark.label}`}
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="font-serif text-sm text-[var(--color-ink)] truncate">
+                            {bookmark.book_title || "(无题)"}
+                          </div>
+                          <div className="mt-1 text-[11px] text-[var(--color-accent)] truncate">
+                            {bookmark.label}
+                          </div>
+                        </div>
+                        <span className="text-[10px] studio-subtle tabular-nums flex-shrink-0 pt-0.5">
+                          {formatRelativeTime(bookmark.created_at)}
+                        </span>
+                      </div>
+                      {bookmark.excerpt && (
+                        <div className="mt-2 text-[11px] studio-subtle line-clamp-2">
+                          {bookmark.excerpt}
+                        </div>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </aside>
+        </div>
       )}
     </div>
   );

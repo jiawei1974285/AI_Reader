@@ -19,8 +19,7 @@ pub fn run() {
             let app_data = app.path().app_data_dir()?;
             std::fs::create_dir_all(&app_data)?;
             let db_path = app_data.join("aireader.db");
-            let conn = db::open(&db_path)
-                .map_err(|e| format!("Failed to open database: {e}"))?;
+            let conn = db::open(&db_path).map_err(|e| format!("Failed to open database: {e}"))?;
             app.manage(AppState {
                 db: Mutex::new(conn),
                 watcher: Mutex::new(None),
@@ -46,10 +45,16 @@ pub fn run() {
             commands::scan_library,
             commands::start_library_watcher,
             commands::list_books,
+            commands::get_douban_metadata,
+            commands::refresh_douban_metadata,
             commands::remove_book,
             commands::get_book_by_path,
             commands::get_progress,
             commands::save_progress,
+            commands::create_bookmark,
+            commands::list_recent_bookmarks,
+            commands::list_bookmarks_by_book,
+            commands::delete_bookmark,
             commands::get_reader_settings,
             commands::set_reader_settings,
             commands::create_highlight,
@@ -59,6 +64,8 @@ pub fn run() {
             commands::update_highlight,
             commands::delete_highlight,
             ai::chat::ai_chat,
+            ai::chat::test_ai_model,
+            ai::chat::ai_extract_entities,
             ai::chat::ai_chat_stream,
             ai::chat::ai_chat_rag_stream,
             ai::chat::get_ai_settings,

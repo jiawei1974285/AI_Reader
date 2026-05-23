@@ -1,5 +1,6 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
-import type { Book } from "@/lib/ipc";
+import { useState } from "react";
+import { ipc, type Book, type DoubanMetadata } from "@/lib/ipc";
 
 type Props = {
   book: Book;
@@ -23,6 +24,8 @@ const FORMAT_LABELS: Record<Book["format"], string> = {
   pdf: "PDF",
   docx: "DOCX",
   mobi: "MOBI",
+  azw: "AZW",
+  azw3: "AZW3",
 };
 
 // Each format gets its own tinted background so users can scan a grid
@@ -32,6 +35,8 @@ const FORMAT_COLORS: Record<Book["format"], string> = {
   epub: "bg-emerald-700/85",
   pdf: "bg-rose-700/85",
   mobi: "bg-amber-700/85",
+  azw: "bg-orange-700/85",
+  azw3: "bg-yellow-700/85",
   docx: "bg-sky-700/85",
   txt: "bg-stone-700/85",
 };
@@ -58,16 +63,31 @@ function placeholderColors(title: string): [string, string] {
 }
 
 export function BookCard({ book, onClick, onRemove }: Props) {
+  const [douban, setDouban] = useState<DoubanMetadata | null>(null);
+  const [doubanLoaded, setDoubanLoaded] = useState(false);
   const hasCover = !!book.cover_path;
   const coverSrc = hasCover ? convertFileSrc(book.cover_path as string) : "";
   const [c1, c2] = placeholderColors(book.title || book.file_path);
   const firstChar = (book.title || "?").trim().charAt(0) || "?";
 
+  function loadDoubanMetadata() {
+    if (doubanLoaded) return;
+    setDoubanLoaded(true);
+    ipc
+      .getDoubanMetadata(book.id)
+      .then((metadata) => setDouban(metadata))
+      .catch(() => setDouban(null));
+  }
+
+  const hasDoubanInfo =
+    douban?.status === "ok" &&
+    (douban.rating || douban.rating_count || douban.summary || douban.douban_url);
+
   // Wrap the whole card in a div so we can host the hover-revealed
   // remove button as a sibling rather than nested inside the <button>
   // (nesting buttons is invalid HTML and would propagate clicks).
   return (
-    <div className="relative group">
+    <div className="relative group" onMouseEnter={loadDoubanMetadata}>
       {onRemove && (
         <button
           type="button"
@@ -150,6 +170,45 @@ export function BookCard({ book, onClick, onRemove }: Props) {
         </div>
       </div>
       </button>
+      <div className="pointer-events-none absolute left-2 right-2 top-3 z-30 translate-y-2 opacity-0 transition duration-150 group-hover:translate-y-0 group-hover:opacity-100">
+        <div className="pointer-events-auto rounded-md border border-[var(--color-paper-edge)] bg-[var(--color-paper)]/95 px-3 py-2 shadow-xl backdrop-blur">
+          {hasDoubanInfo ? (
+            <div className="space-y-1.5">
+              <div className="flex items-baseline justify-between gap-2">
+                <span className="text-[11px] font-medium text-[var(--color-ink)]">
+                  豆瓣
+                </span>
+                <span className="text-[11px] tabular-nums text-[var(--color-accent)]">
+                  {douban.rating ? `★ ${douban.rating}` : "暂无评分"}
+                  {douban.rating_count
+                    ? ` · ${douban.rating_count.toLocaleString()}人`
+                    : ""}
+                </span>
+              </div>
+              {douban.summary && (
+                <p className="text-[11px] leading-relaxed text-[var(--color-ink-soft)] line-clamp-4">
+                  {douban.summary}
+                </p>
+              )}
+              {douban.douban_url && (
+                <a
+                  href={douban.douban_url}
+                  target="_blank"
+                  rel="noreferrer"
+                  onClick={(e) => e.stopPropagation()}
+                  className="inline-flex text-[11px] text-[var(--color-accent)] hover:underline"
+                >
+                  打开豆瓣
+                </a>
+              )}
+            </div>
+          ) : (
+            <p className="text-[11px] text-[var(--color-muted)]">
+              {doubanLoaded ? "暂无豆瓣信息" : "读取豆瓣信息..."}
+            </p>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

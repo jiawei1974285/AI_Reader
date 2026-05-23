@@ -18,7 +18,8 @@ function isDocx(path: string): boolean {
 }
 
 function isMobi(path: string): boolean {
-  return path.toLowerCase().endsWith(".mobi");
+  const p = path.toLowerCase();
+  return p.endsWith(".mobi") || p.endsWith(".azw") || p.endsWith(".azw3");
 }
 
 const now = Date.now();
@@ -149,7 +150,7 @@ const mockTracks: Track[] = [
 export type Book = {
   id: number;
   file_path: string;
-  format: "epub" | "txt" | "pdf" | "docx" | "mobi";
+  format: "epub" | "txt" | "pdf" | "docx" | "mobi" | "azw" | "azw3";
   title: string;
   author: string;
   added_at: number;
@@ -161,11 +162,43 @@ export type Book = {
   read_time_ms: number;
 };
 
+export type DoubanMetadata = {
+  book_id: number;
+  status: "ok" | "not_found" | "failed" | string;
+  rating: string | null;
+  rating_count: number | null;
+  summary: string | null;
+  douban_url: string | null;
+  fetched_at: number;
+  error: string | null;
+};
+
+export type DoubanRefreshReport = {
+  scheduled: number;
+};
+
 export type ReadingProgress = {
   book_id: number;
   spine_index: number;
   scroll_y: number;
   updated_at: number;
+};
+
+export type Bookmark = {
+  id: number;
+  book_id: number;
+  spine_index: number;
+  scroll_y: number;
+  label: string;
+  excerpt: string;
+  created_at: number;
+};
+
+export type BookmarkWithBook = Bookmark & {
+  book_title: string;
+  book_author: string;
+  book_format: Book["format"] | string;
+  book_path: string;
 };
 
 export type ScanReport = {
@@ -231,12 +264,84 @@ async function mockInvoke<T>(
       return false as T;
     case "list_books":
       return mockBooks as T;
+    case "get_douban_metadata":
+      return {
+        book_id: Number(args?.bookId ?? 1),
+        status: "ok",
+        rating: "8.7",
+        rating_count: 12345,
+        summary: "Preview Douban summary loaded from the local metadata cache.",
+        /*
+          "娴忚鍣ㄩ瑙堢殑璞嗙摚绠€浠嬶紝鐪熷疄搴旂敤涓皢浠庢湰鍦扮紦瀛樿鍙栥€?,
+        */
+        douban_url: "https://book.douban.com/",
+        fetched_at: Date.now(),
+        error: null,
+      } as T;
+    case "refresh_douban_metadata":
+      return { scheduled: mockBooks.length } as T;
     case "get_book_by_path":
-      return (
-        mockBooks.find((book) => book.file_path === args?.path) ?? null
-      ) as T;
+      return (mockBooks.find((book) => book.file_path === args?.path) ??
+        null) as T;
     case "get_progress":
       return null as T;
+    case "create_bookmark": {
+      const bookmark: Bookmark = {
+        id: Date.now(),
+        book_id: Number(args?.bookId ?? 1),
+        spine_index: Number(args?.spineIndex ?? 0),
+        scroll_y: Number(args?.scrollY ?? 0),
+        label: String(args?.label ?? ""),
+        excerpt: String(args?.excerpt ?? ""),
+        created_at: Date.now(),
+      };
+      const raw = storage?.getItem("preview_bookmarks");
+      const existing = raw ? (JSON.parse(raw) as BookmarkWithBook[]) : [];
+      const book =
+        mockBooks.find((b) => b.id === bookmark.book_id) ?? mockBooks[0];
+      const withBook: BookmarkWithBook = {
+        ...bookmark,
+        book_title: book.title,
+        book_author: book.author,
+        book_format: book.format,
+        book_path: book.file_path,
+      };
+      storage?.setItem(
+        "preview_bookmarks",
+        JSON.stringify([withBook, ...existing].slice(0, 24)),
+      );
+      return bookmark as T;
+    }
+    case "list_recent_bookmarks": {
+      const raw = storage?.getItem("preview_bookmarks");
+      return (raw ? JSON.parse(raw) : []) as T;
+    }
+    case "list_bookmarks_by_book": {
+      const raw = storage?.getItem("preview_bookmarks");
+      const existing = raw ? (JSON.parse(raw) as BookmarkWithBook[]) : [];
+      const bookId = Number(args?.bookId ?? 0);
+      return existing
+        .filter((bookmark) => bookmark.book_id === bookId)
+        .map((bookmark) => ({
+          id: bookmark.id,
+          book_id: bookmark.book_id,
+          spine_index: bookmark.spine_index,
+          scroll_y: bookmark.scroll_y,
+          label: bookmark.label,
+          excerpt: bookmark.excerpt,
+          created_at: bookmark.created_at,
+        })) as T;
+    }
+    case "delete_bookmark": {
+      const raw = storage?.getItem("preview_bookmarks");
+      const existing = raw ? (JSON.parse(raw) as BookmarkWithBook[]) : [];
+      const id = Number(args?.id ?? 0);
+      storage?.setItem(
+        "preview_bookmarks",
+        JSON.stringify(existing.filter((bookmark) => bookmark.id !== id)),
+      );
+      return undefined as T;
+    }
     case "save_progress":
     case "set_reader_settings":
     case "set_ai_settings":
@@ -293,13 +398,35 @@ async function mockInvoke<T>(
     case "list_highlights_by_book":
       return mockHighlights
         .filter((h) => h.book_id === Number(args?.bookId ?? 1))
-        .map(({ book_title: _title, book_author: _author, book_format: _format, ...h }) => h) as T;
+        .map(
+          ({
+            book_title: _title,
+            book_author: _author,
+            book_format: _format,
+            ...h
+          }) => h,
+        ) as T;
     case "list_all_highlights":
       return mockHighlights as T;
     case "ai_chat":
     case "ai_chat_rag":
     case "ai_summarize_highlights":
       return "这是浏览器预览模式下的 AI 示例回答。真实 AI 调用会在 Tauri 应用中使用你配置的接口。" as T;
+    case "ai_extract_entities":
+      return [
+        {
+          name: "叶文洁",
+          kind: "person",
+          summary: "本章中被重点提到的人物，与故事的核心经历和选择有关。",
+        },
+        {
+          name: "红岸基地",
+          kind: "place",
+          summary: "本章中的关键地点，承载秘密工程和人物命运的转折。",
+        },
+      ] as T;
+    case "test_ai_model":
+      return "连接成功：预览模型已响应" as T;
     case "read_pdf_page_text":
       return `这是浏览器预览模式下第 ${Number(args?.pageIndex ?? 0) + 1} 页的 PDF 文本。切到文本模式后，阅读器字体、字号和行距设置会作用在这里。` as T;
     case "ai_chat_stream":
@@ -382,6 +509,10 @@ export const ipc = {
   scanLibrary: () => invoke<ScanReport>("scan_library"),
   startLibraryWatcher: () => invoke<boolean>("start_library_watcher"),
   listBooks: () => invoke<Book[]>("list_books"),
+  getDoubanMetadata: (bookId: number) =>
+    invoke<DoubanMetadata | null>("get_douban_metadata", { bookId }),
+  refreshDoubanMetadata: (force = false) =>
+    invoke<DoubanRefreshReport>("refresh_douban_metadata", { force }),
   removeBook: (bookId: number) => invoke<void>("remove_book", { bookId }),
   getBookByPath: (path: string) =>
     invoke<Book | null>("get_book_by_path", { path }),
@@ -393,6 +524,18 @@ export const ipc = {
       spineIndex,
       scrollY,
     }),
+  createBookmark: (args: {
+    bookId: number;
+    spineIndex: number;
+    scrollY: number;
+    label: string;
+    excerpt: string;
+  }) => invoke<Bookmark>("create_bookmark", args),
+  listRecentBookmarks: (limit = 12) =>
+    invoke<BookmarkWithBook[]>("list_recent_bookmarks", { limit }),
+  listBookmarksByBook: (bookId: number) =>
+    invoke<Bookmark[]>("list_bookmarks_by_book", { bookId }),
+  deleteBookmark: (id: number) => invoke<void>("delete_bookmark", { id }),
   readBookInitial: (path: string) => {
     if (isTxt(path)) return invoke<EpubPreview>("read_txt_initial", { path });
     if (isDocx(path)) return invoke<EpubPreview>("read_docx_initial", { path });
@@ -434,10 +577,18 @@ export const ipc = {
     invoke<HighlightWithBook[]>("list_all_highlights", { query }),
   updateHighlight: (args: { id: number; color: string; note: string }) =>
     invoke<void>("update_highlight", args),
-  deleteHighlight: (id: number) =>
-    invoke<void>("delete_highlight", { id }),
-  aiChat: (messages: ChatMessage[]) =>
-    invoke<string>("ai_chat", { messages }),
+  deleteHighlight: (id: number) => invoke<void>("delete_highlight", { id }),
+  aiChat: (messages: ChatMessage[]) => invoke<string>("ai_chat", { messages }),
+  aiExtractEntities: (args: { chapterLabel: string; chapterText: string }) =>
+    invoke<ChapterEntity[]>("ai_extract_entities", args),
+  testAiModel: (settings: AiSettings) =>
+    invoke<string>("test_ai_model", {
+      baseUrl: settings.base_url,
+      apiKey: settings.api_key,
+      chatModel: settings.chat_model,
+      temperature: settings.temperature ?? null,
+      fastMode: settings.fast_mode ?? true,
+    }),
   aiChatStream: (messages: ChatMessage[], sessionId: string) =>
     invoke<void>("ai_chat_stream", { messages, sessionId }),
   aiChatRag: (args: {
@@ -456,11 +607,9 @@ export const ipc = {
   aiGetIndexStatus: (bookId: number) =>
     invoke<BookIndexStatus | null>("ai_get_index_status", { bookId }),
   getAiSettings: () => invoke<string | null>("get_ai_settings"),
-  setAiSettings: (value: string) =>
-    invoke<void>("set_ai_settings", { value }),
+  setAiSettings: (value: string) => invoke<void>("set_ai_settings", { value }),
   getMusicRoot: () => invoke<string | null>("get_music_root"),
-  setMusicRoot: (path: string) =>
-    invoke<void>("set_music_root", { path }),
+  setMusicRoot: (path: string) => invoke<void>("set_music_root", { path }),
   scanMusic: () => invoke<Track[]>("scan_music"),
   decryptNcm: (path: string) => invoke<string>("decrypt_ncm", { path }),
   readLrc: (audioPath: string) =>
@@ -604,6 +753,12 @@ export type ChatHit = {
   text: string;
 };
 
+export type ChapterEntity = {
+  name: string;
+  kind: "person" | "place" | string;
+  summary: string;
+};
+
 export type ChatContext = {
   session_id: string;
   hits: ChatHit[];
@@ -644,6 +799,7 @@ export async function saveAiSettings(s: AiSettings): Promise<void> {
 
 export type ReaderTheme = "cream" | "white" | "dark";
 export type ReaderFontFamily = "serif" | "sans";
+export type ReaderMode = "scroll" | "paged";
 
 export type ReaderSettings = {
   font_family: ReaderFontFamily;
@@ -651,6 +807,7 @@ export type ReaderSettings = {
   line_height: number;
   column_width: number;
   theme: ReaderTheme;
+  reading_mode?: ReaderMode;
   paragraph_indent: boolean;
   toc_sidebar_open: boolean;
 };
@@ -661,6 +818,7 @@ export const DEFAULT_READER_SETTINGS: ReaderSettings = {
   line_height: 2.0,
   column_width: 44,
   theme: "cream",
+  reading_mode: "scroll",
   paragraph_indent: true,
   toc_sidebar_open: true,
 };

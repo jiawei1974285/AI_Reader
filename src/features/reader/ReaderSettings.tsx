@@ -1,6 +1,6 @@
-import type { ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 import type { AiSettings, ReaderSettings as Settings } from "@/lib/ipc";
-import { DEFAULT_READER_SETTINGS } from "@/lib/ipc";
+import { DEFAULT_READER_SETTINGS, ipc } from "@/lib/ipc";
 
 type Props = {
   settings: Settings;
@@ -25,6 +25,11 @@ export function ReaderSettingsPanel({
   onAiChange,
   onClose,
 }: Props) {
+  const [aiTestState, setAiTestState] = useState<
+    "idle" | "testing" | "success" | "error"
+  >("idle");
+  const [aiTestMessage, setAiTestMessage] = useState("");
+
   function update<K extends keyof Settings>(key: K, value: Settings[K]) {
     onChange({ ...settings, [key]: value });
   }
@@ -35,6 +40,22 @@ export function ReaderSettingsPanel({
   ) {
     if (!aiSettings || !onAiChange) return;
     onAiChange({ ...aiSettings, [key]: value });
+    setAiTestState("idle");
+    setAiTestMessage("");
+  }
+
+  async function testAiModel() {
+    if (!aiSettings) return;
+    setAiTestState("testing");
+    setAiTestMessage("");
+    try {
+      const msg = await ipc.testAiModel(aiSettings);
+      setAiTestState("success");
+      setAiTestMessage(msg);
+    } catch (e) {
+      setAiTestState("error");
+      setAiTestMessage(String(e));
+    }
   }
 
   return (
@@ -55,6 +76,17 @@ export function ReaderSettingsPanel({
         </div>
 
         <div className="px-6 py-5 space-y-6 text-sm text-[var(--color-ink)]">
+          <Section label="阅读模式">
+            <Segmented
+              value={settings.reading_mode ?? "scroll"}
+              onChange={(v) => update("reading_mode", v)}
+              options={[
+                { value: "scroll", label: "滚动阅读" },
+                { value: "paged", label: "横向翻页" },
+              ]}
+            />
+          </Section>
+
           <Section label="字体">
             <Segmented
               value={settings.font_family}
@@ -198,11 +230,11 @@ export function ReaderSettingsPanel({
                   type="text"
                   value={aiSettings.chat_model}
                   onChange={(e) => updateAi("chat_model", e.target.value)}
-                  placeholder="gpt-4o-mini / deepseek-chat"
+                  placeholder="gpt-4o-mini / deepseek-v4-pro"
                   className="studio-input w-full text-xs font-mono"
                 />
                 <p className="mt-2 text-[10px] studio-subtle leading-relaxed">
-                  ⚡ DeepSeek 用 <span className="font-mono">deepseek-chat</span>{" "}
+                  ⚡ DeepSeek 用 <span className="font-mono">deepseek-v4-pro</span>{" "}
                   最快（V3 非思考版）。要更深度的推理可用{" "}
                   <span className="font-mono">deepseek-reasoner</span>，但开启快速模式时
                   其思考链会被自动过滤。
@@ -222,11 +254,32 @@ export function ReaderSettingsPanel({
                     <span className="block studio-subtle mt-0.5">
                       在请求里加 <span className="font-mono">enable_thinking: false</span>
                       ，并过滤回答里 <span className="font-mono">&lt;think&gt;…&lt;/think&gt;</span>{" "}
-                      块。绝大多数阅读问答场景下能大幅提速。
+                      块。该字段只会发给 DeepSeek/Qwen 等支持的接口。
                     </span>
                   </span>
                 </label>
               </Section>
+
+              <div className="pt-1">
+                <button
+                  onClick={testAiModel}
+                  disabled={aiTestState === "testing"}
+                  className="studio-button w-full disabled:opacity-50 disabled:cursor-wait"
+                >
+                  {aiTestState === "testing" ? "测试中..." : "测试模型连接"}
+                </button>
+                {aiTestMessage && (
+                  <p
+                    className={`mt-2 text-xs leading-relaxed whitespace-pre-wrap ${
+                      aiTestState === "success"
+                        ? "text-[var(--color-accent)]"
+                        : "text-red-600"
+                    }`}
+                  >
+                    {aiTestMessage}
+                  </p>
+                )}
+              </div>
             </>
           )}
         </div>

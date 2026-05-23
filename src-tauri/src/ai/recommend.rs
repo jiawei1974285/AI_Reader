@@ -22,9 +22,7 @@ pub struct Recommendation {
 
 /// Pull every indexed book and reduce its chunks to an average embedding.
 /// Returns (book, avg_vec). Skips books with no chunks.
-fn books_with_avg_embedding(
-    conn: &Connection,
-) -> Result<Vec<(db::Book, Vec<f32>)>, String> {
+fn books_with_avg_embedding(conn: &Connection) -> Result<Vec<(db::Book, Vec<f32>)>, String> {
     let books = db::list_books(conn).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
     for b in books {
@@ -200,8 +198,7 @@ async fn enrich_reasons(
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: "你是一个简洁、有品味的图书推荐助手。"
-                .to_string(),
+            content: "你是一个简洁、有品味的图书推荐助手。".to_string(),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -211,8 +208,8 @@ async fn enrich_reasons(
 
     let reply = ai_chat(messages, state).await?;
     let cleaned = strip_code_fence(&reply);
-    let parsed: Vec<String> = serde_json::from_str(&cleaned)
-        .map_err(|e| format!("LLM 理由 JSON 解析失败: {e}"))?;
+    let parsed: Vec<String> =
+        serde_json::from_str(&cleaned).map_err(|e| format!("LLM 理由 JSON 解析失败: {e}"))?;
     for (i, reason) in parsed.into_iter().enumerate() {
         if let Some(r) = recs.get_mut(i) {
             r.reason = reason;
@@ -268,10 +265,7 @@ pub async fn recommend_music_for_chapter(
 ) -> Result<ChapterMoodWithRecs, String> {
     // 1. Truncate + LLM extract mood
     let snippet = if chapter_text.chars().count() > CHAPTER_MOOD_MAX_CHARS {
-        let s: String = chapter_text
-            .chars()
-            .take(CHAPTER_MOOD_MAX_CHARS)
-            .collect();
+        let s: String = chapter_text.chars().take(CHAPTER_MOOD_MAX_CHARS).collect();
         format!("{s}\n…（后续内容已省略）")
     } else {
         chapter_text.clone()
@@ -288,8 +282,7 @@ pub async fn recommend_music_for_chapter(
     let messages = vec![
         ChatMessage {
             role: "system".to_string(),
-            content: "你是一个能从文字中嗅出氛围、为故事挑选 BGM 的助手。"
-                .to_string(),
+            content: "你是一个能从文字中嗅出氛围、为故事挑选 BGM 的助手。".to_string(),
         },
         ChatMessage {
             role: "user".to_string(),
@@ -342,8 +335,7 @@ pub async fn recommend_music_for_chapter(
         .into_iter()
         .take(top_k)
         .map(|(score, t)| {
-            let mood_tags: Vec<String> =
-                serde_json::from_str(&t.mood_tags).unwrap_or_default();
+            let mood_tags: Vec<String> = serde_json::from_str(&t.mood_tags).unwrap_or_default();
             let filename = std::path::Path::new(&t.track_path)
                 .file_stem()
                 .and_then(|s| s.to_str())
