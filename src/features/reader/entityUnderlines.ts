@@ -8,6 +8,30 @@ export function entityKey(entity: ChapterEntity): string {
   return `${entity.kind}:${entity.name}`;
 }
 
+/**
+ * 把 AI 返回的原始 entities 清洗成内部用的 EntityWithKey 列表：
+ *   - trim name/summary
+ *   - 丢空 name 或空 summary 的
+ *   - kind 收敛到 "person" / "place"（LLM 偶尔返 "human" 之类的别名）
+ *   - 按 entityKey 去重（同名同 kind 只留第一条）
+ */
+export function normalizeEntities(entities: ChapterEntity[]): EntityWithKey[] {
+  const seen = new Set<string>();
+  const out: EntityWithKey[] = [];
+  for (const entity of entities) {
+    const name = entity.name.trim();
+    const summary = entity.summary.trim();
+    if (!name || !summary) continue;
+    const kind = entity.kind === "person" ? "person" : "place";
+    const normalized = { name, summary, kind };
+    const key = entityKey(normalized);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push({ ...normalized, key });
+  }
+  return out;
+}
+
 export function applyEntityUnderlines(
   root: HTMLElement,
   entities: EntityWithKey[],

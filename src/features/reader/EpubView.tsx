@@ -3,7 +3,6 @@ import {
   ipc,
   type AiSettings,
   type Bookmark,
-  type ChapterEntity,
   type EpubPreview,
   type Highlight,
   type TocEntry,
@@ -16,20 +15,21 @@ import { ChatPanel } from "./ChatPanel";
 import { LookupBubble } from "./LookupBubble";
 import { MusicSuggestPanel } from "./MusicSuggestPanel";
 import { useReadTimeHeartbeat } from "./useReadTimeHeartbeat";
-import { applyHighlights, captureSelection } from "./highlight";
+import { applyHighlights } from "./highlight";
 import { findViewportTopAnchor, scrollToAnchor } from "./progressAnchor";
 import { useReadingProgress } from "./useReadingProgress";
-// B2 阶段 1: 4 个独立小 hook
+// B2 阶段 1+2: 抽出独立 hook
 import { useFullscreen } from "./useFullscreen";
 import { useReaderSettings } from "./useReaderSettings";
 import { useBookmarksPanel } from "./useBookmarksPanel";
 import { useReaderKeybindings } from "./useReaderKeybindings";
+import { useSelectionPopover } from "./useSelectionPopover";
+import { useChapterEntities } from "./useChapterEntities";
 import { BookSearch } from "./BookSearch";
 import { BookmarksPanel } from "./BookmarksPanel";
 import { ChapterEntitiesPanel } from "./ChapterEntitiesPanel";
 import {
   applyEntityUnderlines,
-  entityKey,
   type EntityWithKey,
 } from "./entityUnderlines";
 
@@ -53,18 +53,7 @@ const COLOR_SWATCHES: Record<HighlightColor, string> = {
   red: "#fc645a",
 };
 
-type PendingSelection = {
-  rect: DOMRect;
-  spineIdx: number;
-  selectedText: string;
-  prefix: string;
-  suffix: string;
-};
-
-type ActiveHighlight = {
-  hl: Highlight;
-  rect: DOMRect;
-};
+// B2: PendingSelection / ActiveHighlight 类型已搬到 useSelectionPopover.ts
 
 export function EpubView({
   path,
@@ -115,13 +104,9 @@ export function EpubView({
     bookmarksLoading,
     refresh: refreshBookmarks,
   } = useBookmarksPanel(bookId);
-  const [entitiesOpen, setEntitiesOpen] = useState(false);
-  const [entitiesBySpine, setEntitiesBySpine] = useState<
-    Record<number, EntityWithKey[]>
-  >({});
-  const [entitiesLoading, setEntitiesLoading] = useState(false);
-  const [entitiesError, setEntitiesError] = useState<string | null>(null);
-  const [activeEntityKey, setActiveEntityKey] = useState<string | null>(null);
+  // B2: entities 5 个 state + click effect + fetch fn 都搬到 useChapterEntities，
+  //     但 hook 需要 currentChapter/currentChapterLabel/aiConfigured，这些在下方
+  //     才计算——所以 hook 的实例化移到 line ~165 处（chapter 解出来之后）。
   const [bookmarkStatus, setBookmarkStatus] = useState<string | null>(null);
 
   // B2: 进度（初始 load / 恢复 / 滚动 throttle 保存）三件事抽到一个 hook。
@@ -136,14 +121,20 @@ export function EpubView({
 
   // Single flat source of truth for highlights
   const [allHighlights, setAllHighlights] = useState<Highlight[]>([]);
-  const [pendingSel, setPendingSel] = useState<PendingSelection | null>(null);
-  const [activeHl, setActiveHl] = useState<ActiveHighlight | null>(null);
   const [annotationsOpen, setAnnotationsOpen] = useState(false);
 
   const scrollRef = useRef<HTMLDivElement>(null);
   const sentinelRef = useRef<HTMLDivElement>(null);
   const chapterEls = useRef<Map<number, HTMLElement>>(new Map());
   const toolbarRef = useRef<HTMLDivElement>(null);
+
+  // B2: 选区浮动工具栏 + 点击高亮 popover — 三个 effect 都搬到 hook
+  const { pendingSel, setPendingSel, activeHl, setActiveHl } =
+    useSelectionPopover({
+      scrollRef,
+      toolbarRef,
+      allHighlights,
+    });
 
   // Derived: highlights grouped by chapter for fast lookup per ChapterBlock
   const highlightsForChapter = useMemo(() => {
@@ -161,12 +152,30 @@ export function EpubView({
   const currentChapterLabel =
     toc.find((t) => t.spine_index === activeIdx)?.label ??
     `第 ${activeIdx + 1} 章`;
-  const currentEntities = entitiesBySpine[activeIdx] ?? [];
   const aiConfigured =
     aiSettings.base_url.trim() !== "" &&
     aiSettings.api_key.trim() !== "" &&
     aiSettings.chat_model.trim() !== "";
   const isPagedMode = (settings.reading_mode ?? "scroll") === "paged";
+
+  // B2: entities 抽到 useChapterEntities（在 currentChapter 解出后）
+  const {
+    entitiesBySpine,
+    currentEntities,
+    entitiesOpen,
+    setEntitiesOpen,
+    entitiesLoading,
+    entitiesError,
+    activeEntityKey,
+    setActiveEntityKey,
+    fetchEntitiesForCurrentChapter,
+  } = useChapterEntities({
+    scrollRef,
+    aiConfigured,
+    currentChapter,
+    currentChapterLabel,
+    htmlToText,
+  });
 
   // B2: theme apply / settings load+save 都已抽到 useReaderSettings；
   //      refreshBookmarks + auto-refresh 都已抽到 useBookmarksPanel
@@ -437,100 +446,9 @@ export function EpubView({
     });
   }, [chapters, isPagedMode, pagedWidth, settings.font_size, settings.line_height]);
 
-  // Selection floating toolbar
-  useEffect(() => {
-    function onMouseUp() {
-      window.setTimeout(() => {
-        const sel = window.getSelection();
-        if (!sel || sel.isCollapsed) {
-          setPendingSel(null);
-          return;
-        }
-        const range = sel.getRangeAt(0);
-        let node: Node | null = range.commonAncestorContainer;
-        let section: HTMLElement | null = null;
-        while (node) {
-          if (node instanceof HTMLElement && node.dataset.spine != null) {
-            section = node;
-            break;
-          }
-          node = node.parentNode;
-        }
-        if (!section) {
-          setPendingSel(null);
-          return;
-        }
-        const cap = captureSelection(section);
-        if (!cap) {
-          setPendingSel(null);
-          return;
-        }
-        setPendingSel({
-          rect: cap.rect,
-          spineIdx: Number(section.dataset.spine),
-          selectedText: cap.selectedText,
-          prefix: cap.prefix,
-          suffix: cap.suffix,
-        });
-      }, 10);
-    }
-    document.addEventListener("mouseup", onMouseUp);
-    return () => document.removeEventListener("mouseup", onMouseUp);
-  }, []);
+  // B2: 选区/popover 三个 effect 都搬到 useSelectionPopover
 
-  // Click outside selection toolbar dismisses it
-  useEffect(() => {
-    function onMouseDown(e: MouseEvent) {
-      const target = e.target as HTMLElement;
-      if (toolbarRef.current && toolbarRef.current.contains(target)) return;
-      if (target.closest && target.closest("mark.ai-hl")) return;
-      setPendingSel(null);
-    }
-    document.addEventListener("mousedown", onMouseDown);
-    return () => document.removeEventListener("mousedown", onMouseDown);
-  }, []);
-
-  // Click on existing highlight open popover
-  useEffect(() => {
-    const root = scrollRef.current;
-    if (!root) return;
-    function onClick(e: Event) {
-      const target = e.target as HTMLElement;
-      if (target.closest(".ai-entity")) return;
-      const mark = target.closest("mark.ai-hl") as HTMLElement | null;
-      if (!mark) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const id = Number(mark.dataset.hlId);
-      const hl = allHighlights.find((h) => h.id === id);
-      if (!hl) return;
-      setActiveHl({ hl, rect: mark.getBoundingClientRect() });
-    }
-    root.addEventListener("click", onClick);
-    return () => root.removeEventListener("click", onClick);
-  }, [allHighlights]);
-
-  useEffect(() => {
-    const root = scrollRef.current;
-    if (!root) return;
-    function onClick(e: Event) {
-      const target = e.target as HTMLElement;
-      const span = target.closest(".ai-entity") as HTMLElement | null;
-      if (!span) return;
-      e.preventDefault();
-      e.stopPropagation();
-      const key = span.dataset.entityKey;
-      if (!key) return;
-      const entity = Object.values(entitiesBySpine)
-        .flat()
-        .find((item) => item.key === key);
-      if (!entity) return;
-      setEntitiesOpen(true);
-      setActiveEntityKey(entity.key);
-    }
-    root.addEventListener("click", onClick);
-    return () => root.removeEventListener("click", onClick);
-  }, [entitiesBySpine]);
+  // B2: ai-entity click → 打开面板 effect 搬到 useChapterEntities
 
   async function commitHighlight(color: HighlightColor) {
     if (!pendingSel) return;
@@ -841,35 +759,7 @@ export function EpubView({
     [],
   );
 
-  async function extractCurrentEntities() {
-    if (!currentChapter) return;
-    if (!aiConfigured) {
-      setEntitiesError("请先在 AI 设置中配置模型接口。");
-      return;
-    }
-    setEntitiesOpen(true);
-    setEntitiesLoading(true);
-    setEntitiesError(null);
-    setActiveEntityKey(null);
-    try {
-      const result = await ipc.aiExtractEntities({
-        chapterLabel: currentChapterLabel,
-        chapterText: htmlToText(currentChapter.html),
-      });
-      const withKeys = normalizeEntities(result);
-      setEntitiesBySpine((prev) => ({
-        ...prev,
-        [currentChapter.spine_index]: withKeys,
-      }));
-      if (withKeys.length === 0) {
-        setEntitiesError("本章没有提取到明显的人名或地名。");
-      }
-    } catch (e) {
-      setEntitiesError(String(e));
-    } finally {
-      setEntitiesLoading(false);
-    }
-  }
+  // B2: extractCurrentEntities 抽到 useChapterEntities.fetchEntitiesForCurrentChapter
 
   async function addBookmark() {
     if (!currentChapter) return;
@@ -1159,7 +1049,7 @@ export function EpubView({
             loading={entitiesLoading}
             error={entitiesError}
             activeKey={activeEntityKey}
-            onExtract={extractCurrentEntities}
+            onExtract={fetchEntitiesForCurrentChapter}
             onSelect={selectEntity}
             onOpenSettings={onOpenAiSettings}
             onClose={() => setEntitiesOpen(false)}
@@ -1367,22 +1257,7 @@ function htmlToText(html: string): string {
   return s;
 }
 
-function normalizeEntities(entities: ChapterEntity[]): EntityWithKey[] {
-  const seen = new Set<string>();
-  const out: EntityWithKey[] = [];
-  for (const entity of entities) {
-    const name = entity.name.trim();
-    const summary = entity.summary.trim();
-    if (!name || !summary) continue;
-    const kind = entity.kind === "person" ? "person" : "place";
-    const normalized = { name, summary, kind };
-    const key = entityKey(normalized);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push({ ...normalized, key });
-  }
-  return out;
-}
+// B2: normalizeEntities 已移到 entityUnderlines.ts，被 useChapterEntities 复用
 
 function cssEscape(value: string): string {
   if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(value);
