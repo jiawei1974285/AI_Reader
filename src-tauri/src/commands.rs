@@ -478,6 +478,57 @@ pub struct DayReading {
     pub bookmarks: Vec<db::BookmarkWithBook>,
 }
 
+// ---------- C7: AI 对话沉淀 ----------
+
+#[tauri::command]
+pub fn save_ai_note(
+    book_id: i64,
+    spine_index: i64,
+    mode: String,
+    question: String,
+    answer: String,
+    hits_json: Option<String>,
+    state: State<AppState>,
+) -> Result<i64, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::create_ai_note(
+        &conn,
+        book_id,
+        spine_index,
+        &mode,
+        &question,
+        &answer,
+        hits_json.as_deref(),
+        now_ms,
+    )
+    .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_ai_notes_by_book(
+    book_id: i64,
+    state: State<AppState>,
+) -> Result<Vec<db::AiNote>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::list_ai_notes_by_book(&conn, book_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_all_ai_notes(state: State<AppState>) -> Result<Vec<db::AiNoteWithBook>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::list_all_ai_notes(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_ai_note(id: i64, state: State<AppState>) -> Result<(), String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::delete_ai_note(&conn, id).map_err(|e| e.to_string())
+}
+
 // ---------- C1: 全库 / 单本 全文检索 ----------
 
 #[tauri::command]

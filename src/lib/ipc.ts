@@ -378,6 +378,13 @@ async function mockInvoke<T>(
       return 0 as T;
     case "fts_search":
       return [] as T;
+    case "save_ai_note":
+      return 1 as T;
+    case "list_ai_notes_by_book":
+    case "list_all_ai_notes":
+      return [] as T;
+    case "delete_ai_note":
+      return undefined as T;
     case "read_epub_preview":
     case "read_txt_initial":
     case "read_docx_initial":
@@ -750,6 +757,44 @@ export const ipc = {
   // C1: 全文 FTS5 检索（要求该书已 index）
   ftsSearch: (query: string, bookId: number | null = null, limit = 50) =>
     invoke<FtsHit[]>("fts_search", { query, bookId, limit }),
+  // C7: AI 对话沉淀为笔记
+  saveAiNote: (args: {
+    bookId: number;
+    spineIndex: number;
+    mode: string;
+    question: string;
+    answer: string;
+    hitsJson?: string | null;
+  }) =>
+    invoke<number>("save_ai_note", {
+      bookId: args.bookId,
+      spineIndex: args.spineIndex,
+      mode: args.mode,
+      question: args.question,
+      answer: args.answer,
+      hitsJson: args.hitsJson ?? null,
+    }),
+  listAiNotesByBook: (bookId: number) =>
+    invoke<AiNote[]>("list_ai_notes_by_book", { bookId }),
+  listAllAiNotes: () => invoke<AiNoteWithBook[]>("list_all_ai_notes"),
+  deleteAiNote: (id: number) => invoke<void>("delete_ai_note", { id }),
+};
+
+export type AiNote = {
+  id: number;
+  book_id: number;
+  spine_index: number;
+  mode: string;
+  question: string;
+  answer: string;
+  hits_json: string | null;
+  created_at: number;
+};
+
+export type AiNoteWithBook = AiNote & {
+  book_title: string;
+  book_author: string;
+  book_format: string;
 };
 
 export type FtsHit = {

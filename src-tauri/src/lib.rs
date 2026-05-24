@@ -150,6 +150,10 @@ pub fn run() {
             commands::export_highlights_epub,
             commands::export_highlights_csv,
             commands::fts_search,
+            commands::save_ai_note,
+            commands::list_ai_notes_by_book,
+            commands::list_all_ai_notes,
+            commands::delete_ai_note,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

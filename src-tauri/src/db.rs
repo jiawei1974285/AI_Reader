@@ -118,6 +118,23 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session
   ON chat_messages(book_id, mode, spine_index, created_at);
 
+-- C7: AI 对话沉淀。把 ChatPanel 里有价值的 AI 回答（连带它引用的片段）
+-- 落到表里，作为 "可重读的读书笔记"。比 chat_messages 高一级：chat_messages
+-- 是流水会话，可清；ai_notes 是用户显式标记 "这条值得留下" 的子集。
+-- spine_index = -1 表示 book/library 模式下的笔记 (不绑定具体章)。
+CREATE TABLE IF NOT EXISTS ai_notes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    spine_index INTEGER NOT NULL,
+    mode TEXT NOT NULL,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    hits_json TEXT,
+    created_at INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_ai_notes_book ON ai_notes(book_id, spine_index, created_at);
+
 -- C1: 全文检索 (FTS5 + trigram 分词) 覆盖 book_chunks.text。
 -- 用 trigram 是因为 SQLite 默认 unicode61 分词对 CJK 无效；trigram 把
 -- 任意 3 字滑窗作 token，中文短查询（>=3 字符）召回稳定，不需要 jieba 等
@@ -1456,6 +1473,104 @@ pub fn list_chunks(conn: &Connection, book_id: Option<i64>) -> rusqlite::Result<
         }
     }
     Ok(rows)
+}
+
+// ---------- C7: AI 对话沉淀为笔记 ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AiNote {
+    pub id: i64,
+    pub book_id: i64,
+    pub spine_index: i64,
+    pub mode: String,
+    pub question: String,
+    pub answer: String,
+    pub hits_json: Option<String>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AiNoteWithBook {
+    pub id: i64,
+    pub book_id: i64,
+    pub spine_index: i64,
+    pub mode: String,
+    pub question: String,
+    pub answer: String,
+    pub hits_json: Option<String>,
+    pub created_at: i64,
+    pub book_title: String,
+    pub book_author: String,
+    pub book_format: String,
+}
+
+pub fn create_ai_note(
+    conn: &Connection,
+    book_id: i64,
+    spine_index: i64,
+    mode: &str,
+    question: &str,
+    answer: &str,
+    hits_json: Option<&str>,
+    now_ms: i64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO ai_notes (book_id, spine_index, mode, question, answer, hits_json, created_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+        params![book_id, spine_index, mode, question, answer, hits_json, now_ms],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn list_ai_notes_by_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<AiNote>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, book_id, spine_index, mode, question, answer, hits_json, created_at
+         FROM ai_notes WHERE book_id = ?1
+         ORDER BY created_at DESC",
+    )?;
+    let rows = stmt.query_map(params![book_id], |row| {
+        Ok(AiNote {
+            id: row.get(0)?,
+            book_id: row.get(1)?,
+            spine_index: row.get(2)?,
+            mode: row.get(3)?,
+            question: row.get(4)?,
+            answer: row.get(5)?,
+            hits_json: row.get(6)?,
+            created_at: row.get(7)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn list_all_ai_notes(conn: &Connection) -> rusqlite::Result<Vec<AiNoteWithBook>> {
+    let mut stmt = conn.prepare(
+        "SELECT n.id, n.book_id, n.spine_index, n.mode, n.question, n.answer,
+                n.hits_json, n.created_at, b.title, b.author, b.format
+         FROM ai_notes n JOIN books b ON b.id = n.book_id
+         ORDER BY n.created_at DESC LIMIT 500",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(AiNoteWithBook {
+            id: row.get(0)?,
+            book_id: row.get(1)?,
+            spine_index: row.get(2)?,
+            mode: row.get(3)?,
+            question: row.get(4)?,
+            answer: row.get(5)?,
+            hits_json: row.get(6)?,
+            created_at: row.get(7)?,
+            book_title: row.get(8)?,
+            book_author: row.get(9)?,
+            book_format: row.get(10)?,
+        })
+    })?;
+    rows.collect()
+}
+
+pub fn delete_ai_note(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM ai_notes WHERE id = ?1", params![id])?;
+    Ok(())
 }
 
 // ---------- C1: 全文检索 (FTS5 trigram) ----------

@@ -564,17 +564,34 @@ ${ctx}
             </div>
           )}
 
-          {messages.map((m, i) => (
-            <MessageBubble
-              key={i}
-              role={m.role}
-              content={m.content}
-              hits={m.hits}
-              bookId={bookId}
-              onJumpToChapter={onJumpToChapter}
-              onClose={onClose}
-            />
-          ))}
+          {messages.map((m, i) => {
+            // C7: 保存 AI 回答为笔记时，需要带上"问"——就是最近的一条 user 消息
+            const precedingQuestion =
+              m.role === "assistant"
+                ? (() => {
+                    for (let k = i - 1; k >= 0; k--) {
+                      if (messages[k].role === "user") return messages[k].content;
+                    }
+                    return "";
+                  })()
+                : "";
+            return (
+              <MessageBubble
+                key={i}
+                role={m.role}
+                content={m.content}
+                hits={m.hits}
+                bookId={bookId}
+                onJumpToChapter={onJumpToChapter}
+                onClose={onClose}
+                noteContext={{
+                  mode,
+                  spineIndex: sessionSpine,
+                  question: precedingQuestion,
+                }}
+              />
+            );
+          })}
           {loading &&
             (messages.length === 0 ||
               (messages[messages.length - 1].role === "assistant" &&
@@ -634,6 +651,7 @@ function MessageBubble({
   bookId,
   onJumpToChapter,
   onClose,
+  noteContext,
 }: {
   role: ChatMessage["role"];
   content: string;
@@ -641,6 +659,8 @@ function MessageBubble({
   bookId: number;
   onJumpToChapter?: (spineIndex: number) => void;
   onClose?: () => void;
+  /** C7: 把这条 assistant 回答存为笔记需要的上下文。 */
+  noteContext?: { mode: string; spineIndex: number; question: string };
 }) {
   if (role === "system") return null;
   // Skip empty assistant bubble during initial stream wait — parent
@@ -665,7 +685,71 @@ function MessageBubble({
         {role === "assistant" && hits && hits.length > 0 && content.trim() !== "" && (
           <CitationSaveRow hits={hits} bookId={bookId} aiReply={content} />
         )}
+        {role === "assistant" && content.trim() !== "" && noteContext && (
+          <SaveAsNoteButton
+            bookId={bookId}
+            spineIndex={noteContext.spineIndex}
+            mode={noteContext.mode}
+            question={noteContext.question}
+            answer={content}
+            hits={hits}
+          />
+        )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * C7: "💾 存为笔记" — 把当前这条 AI 回答（+ 问题 + 引用片段）整体落到
+ * ai_notes 表。NotesView 里会显示。
+ */
+function SaveAsNoteButton({
+  bookId,
+  spineIndex,
+  mode,
+  question,
+  answer,
+  hits,
+}: {
+  bookId: number;
+  spineIndex: number;
+  mode: string;
+  question: string;
+  answer: string;
+  hits?: ChatHit[];
+}) {
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  async function save() {
+    if (saving || saved) return;
+    setSaving(true);
+    try {
+      await ipc.saveAiNote({
+        bookId,
+        spineIndex,
+        mode,
+        question,
+        answer,
+        hitsJson: hits && hits.length > 0 ? JSON.stringify(hits) : null,
+      });
+      setSaved(true);
+    } catch {
+      // 留按钮可重试
+    } finally {
+      setSaving(false);
+    }
+  }
+  return (
+    <div className="mt-2 pt-2 border-t border-[var(--color-paper-edge)]/40 flex items-center justify-end">
+      <button
+        onClick={save}
+        disabled={saving || saved}
+        className="text-[11px] px-2 py-0.5 rounded studio-button disabled:opacity-50"
+        title="把这条 AI 回答存到笔记，可在「笔记」视图里看到"
+      >
+        {saved ? "✓ 已存为笔记" : saving ? "保存中…" : "💾 存为笔记"}
+      </button>
     </div>
   );
 }
