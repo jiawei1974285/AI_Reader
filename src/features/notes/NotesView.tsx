@@ -1,5 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { ipc, type Book, type HighlightWithBook } from "@/lib/ipc";
+import {
+  buildAllBooksMarkdown,
+  buildAnkiCsv,
+  buildBookMarkdown,
+  downloadTextFile,
+} from "./markdown";
 
 const COLOR_HEX: Record<string, string> = {
   yellow: "#facc15",
@@ -85,6 +91,48 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
             placeholder="搜索标注或笔记…"
             className="studio-input text-sm w-64"
           />
+          {/* C10: 导出当前可见结果。Markdown 适合手动阅读 / 二次编辑；
+              CSV 适合直接灌进 Anki 当卡片用。 */}
+          <button
+            onClick={() => {
+              if (items.length === 0) return;
+              const md = buildAllBooksMarkdown(items);
+              const ts = new Date()
+                .toISOString()
+                .slice(0, 10)
+                .replace(/-/g, "");
+              downloadTextFile(
+                `aireader-标注-${ts}.md`,
+                md,
+                "text/markdown;charset=utf-8",
+              );
+            }}
+            disabled={items.length === 0}
+            className="studio-button disabled:opacity-50 disabled:cursor-not-allowed"
+            title="导出当前可见的所有标注为 Markdown"
+          >
+            导出 .md
+          </button>
+          <button
+            onClick={() => {
+              if (items.length === 0) return;
+              const csv = buildAnkiCsv(items);
+              const ts = new Date()
+                .toISOString()
+                .slice(0, 10)
+                .replace(/-/g, "");
+              downloadTextFile(
+                `aireader-anki-${ts}.csv`,
+                csv,
+                "text/csv;charset=utf-8",
+              );
+            }}
+            disabled={items.length === 0}
+            className="studio-button disabled:opacity-50 disabled:cursor-not-allowed"
+            title="导出当前可见的所有标注为 Anki 卡片 (CSV)"
+          >
+            导出 Anki
+          </button>
           <button
             onClick={onBack}
             className="studio-button"
@@ -112,9 +160,37 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
                 <h3 className="font-serif text-xl text-[var(--color-ink)]">
                   {hls[0].book_title}
                 </h3>
-                <span className="text-xs text-[var(--color-muted)]">
-                  {hls[0].book_author || "—"} · {hls.length} 条
-                </span>
+                <div className="flex items-center gap-3 text-xs text-[var(--color-muted)]">
+                  <span>
+                    {hls[0].book_author || "—"} · {hls.length} 条
+                  </span>
+                  {/* C10: 单本导出 */}
+                  <button
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      const md = buildBookMarkdown(
+                        {
+                          title: hls[0].book_title,
+                          author: hls[0].book_author,
+                        },
+                        hls,
+                        [],
+                      );
+                      const safeTitle =
+                        hls[0].book_title.replace(/[<>:"/\\|?*]/g, "_") ||
+                        "book";
+                      downloadTextFile(
+                        `${safeTitle}-标注.md`,
+                        md,
+                        "text/markdown;charset=utf-8",
+                      );
+                    }}
+                    className="studio-chip text-[10px] px-2 py-0.5"
+                    title="导出本书所有标注为 Markdown"
+                  >
+                    ↓ .md
+                  </button>
+                </div>
               </div>
               <ul className="space-y-3">
                 {hls.map((h) => {

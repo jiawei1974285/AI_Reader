@@ -73,31 +73,18 @@ fn extract_txt_chapters(path: &Path) -> Result<Vec<ChapterText>, String> {
 }
 
 fn extract_docx_chapters(path: &Path) -> Result<Vec<ChapterText>, String> {
-    use docx_rs::*;
-    let bytes = std::fs::read(path).map_err(|e| format!("Failed to read DOCX: {e}"))?;
-    let docx = read_docx(&bytes).map_err(|e| format!("Failed to parse DOCX: {e:?}"))?;
-    let mut text = String::new();
-    for child in &docx.document.children {
-        if let DocumentChild::Paragraph(p) = child {
-            for child in &p.children {
-                if let ParagraphChild::Run(r) = child {
-                    for rc in &r.children {
-                        if let RunChild::Text(t) = rc {
-                            text.push_str(&t.text);
-                        }
-                    }
-                }
-            }
-            text.push('\n');
-        }
-    }
-    if text.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    Ok(vec![ChapterText {
-        spine_index: 0,
-        text,
-    }])
+    // B5: 用 readers::docx 的切章逻辑，让索引的 spine_index 和阅读器的对得上。
+    // 之前所有 DOCX 都被塞进 spine_index=0 一章，RAG 引用永远跳首页 (评审 P2-12)。
+    let (_title, chapters) = crate::readers::docx::parse_docx_chapters(path)?;
+    Ok(chapters
+        .into_iter()
+        .enumerate()
+        .filter(|(_, ch)| !ch.text.trim().is_empty())
+        .map(|(idx, ch)| ChapterText {
+            spine_index: idx,
+            text: ch.text,
+        })
+        .collect())
 }
 
 fn extract_mobi_chapters(path: &Path) -> Result<Vec<ChapterText>, String> {
