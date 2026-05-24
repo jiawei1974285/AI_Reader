@@ -1,16 +1,11 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
-  DEFAULT_READER_SETTINGS,
   ipc,
-  loadReaderSettings,
-  saveReaderSettings,
   type AiSettings,
   type Bookmark,
   type ChapterEntity,
   type EpubPreview,
   type Highlight,
-  type ReaderSettings,
   type TocEntry,
 } from "@/lib/ipc";
 import { ReaderSettingsPanel } from "./ReaderSettings";
@@ -24,6 +19,11 @@ import { useReadTimeHeartbeat } from "./useReadTimeHeartbeat";
 import { applyHighlights, captureSelection } from "./highlight";
 import { findViewportTopAnchor, scrollToAnchor } from "./progressAnchor";
 import { useReadingProgress } from "./useReadingProgress";
+// B2 阶段 1: 4 个独立小 hook
+import { useFullscreen } from "./useFullscreen";
+import { useReaderSettings } from "./useReaderSettings";
+import { useBookmarksPanel } from "./useBookmarksPanel";
+import { useReaderKeybindings } from "./useReaderKeybindings";
 import { BookSearch } from "./BookSearch";
 import { BookmarksPanel } from "./BookmarksPanel";
 import { ChapterEntitiesPanel } from "./ChapterEntitiesPanel";
@@ -89,10 +89,8 @@ export function EpubView({
   const [error, setError] = useState<string | null>(null);
   const [activeIdx, setActiveIdx] = useState<number>(0);
 
-  const [settings, setSettings] = useState<ReaderSettings>(
-    DEFAULT_READER_SETTINGS,
-  );
-  const [settingsReady, setSettingsReady] = useState(false);
+  // B2: 抽到 useReaderSettings — load / debounced save / theme apply 三个 effect 一并搬走
+  const { settings, setSettings, settingsReady } = useReaderSettings();
   const [pagedWidth, setPagedWidth] = useState(720);
   const [pageOffset, setPageOffset] = useState(0);
   const [pageMaxOffset, setPageMaxOffset] = useState(0);
@@ -106,11 +104,17 @@ export function EpubView({
     prefix: string;
     suffix: string;
   } | null>(null);
-  const [fullscreen, setFullscreen] = useState(false);
+  // B2: 抽到 useFullscreen — 既同步 OS 状态又提供 toggle
+  const { fullscreen, toggleFullscreen } = useFullscreen();
   const [searchOpen, setSearchOpen] = useState(false);
-  const [bookmarksOpen, setBookmarksOpen] = useState(false);
-  const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
-  const [bookmarksLoading, setBookmarksLoading] = useState(false);
+  // B2: 抽到 useBookmarksPanel — 抽屉开关 + 列表 + auto-refresh
+  const {
+    bookmarks,
+    bookmarksOpen,
+    setBookmarksOpen,
+    bookmarksLoading,
+    refresh: refreshBookmarks,
+  } = useBookmarksPanel(bookId);
   const [entitiesOpen, setEntitiesOpen] = useState(false);
   const [entitiesBySpine, setEntitiesBySpine] = useState<
     Record<number, EntityWithKey[]>
@@ -124,50 +128,8 @@ export function EpubView({
   // A4 引入的 paragraph_index/char_offset 在 hook 内部统一管。
   const readingProgress = useReadingProgress();
 
-  // Ctrl/Cmd+F opens the in-book search bar (current page only; pdf.js
-  // Listen in CAPTURE phase + on window so WebView2's native find toolbar
-  // doesn't intercept the event before we can preventDefault it.
-  useEffect(() => {
-    function onKey(e: KeyboardEvent) {
-      if (
-        (e.ctrlKey || e.metaKey) &&
-        !e.shiftKey &&
-        !e.altKey &&
-        (e.key === "f" || e.key === "F")
-      ) {
-        e.preventDefault();
-        e.stopPropagation();
-        setSearchOpen(true);
-      }
-    }
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
-  }, []);
-
-  // Sync fullscreen state on mount
-  useEffect(() => {
-    let mounted = true;
-    getCurrentWindow()
-      .isFullscreen()
-      .then((v) => {
-        if (mounted) setFullscreen(v);
-      })
-      .catch(() => {});
-    return () => {
-      mounted = false;
-    };
-  }, []);
-
-  async function toggleFullscreen() {
-    try {
-      const win = getCurrentWindow();
-      const isFs = await win.isFullscreen();
-      await win.setFullscreen(!isFs);
-      setFullscreen(!isFs);
-    } catch {
-      // ignore
-    }
-  }
+  // B2: Ctrl+F 抽到 useReaderKeybindings；fullscreen 抽到 useFullscreen（见上）
+  useReaderKeybindings({ onOpenSearch: () => setSearchOpen(true) });
 
   const [toc, setToc] = useState<TocEntry[]>([]);
   const [tocLoading, setTocLoading] = useState(true);
@@ -206,43 +168,8 @@ export function EpubView({
     aiSettings.chat_model.trim() !== "";
   const isPagedMode = (settings.reading_mode ?? "scroll") === "paged";
 
-  // Apply theme to <body>
-  useEffect(() => {
-    document.body.setAttribute("data-theme", settings.theme);
-    return () => {
-      document.body.removeAttribute("data-theme");
-    };
-  }, [settings.theme]);
-
-  useEffect(() => {
-    loadReaderSettings()
-      .then(setSettings)
-      .catch(() => {})
-      .finally(() => setSettingsReady(true));
-  }, []);
-
-  const refreshBookmarks = useCallback(async () => {
-    setBookmarksLoading(true);
-    try {
-      setBookmarks(await ipc.listBookmarksByBook(bookId));
-    } catch {
-      setBookmarks([]);
-    } finally {
-      setBookmarksLoading(false);
-    }
-  }, [bookId]);
-
-  useEffect(() => {
-    if (bookmarksOpen) refreshBookmarks();
-  }, [bookmarksOpen, refreshBookmarks]);
-
-  useEffect(() => {
-    if (!settingsReady) return;
-    const t = window.setTimeout(() => {
-      saveReaderSettings(settings).catch(() => {});
-    }, 200);
-    return () => window.clearTimeout(t);
-  }, [settings, settingsReady]);
+  // B2: theme apply / settings load+save 都已抽到 useReaderSettings；
+  //      refreshBookmarks + auto-refresh 都已抽到 useBookmarksPanel
 
   useEffect(() => {
     let cancelled = false;
@@ -898,7 +825,8 @@ export function EpubView({
     if (!window.confirm("删除这条书签？")) return;
     try {
       await ipc.deleteBookmark(bookmark.id);
-      setBookmarks((prev) => prev.filter((item) => item.id !== bookmark.id));
+      // B2: hook 内部不暴露 setBookmarks——删完直接 refresh（本地 DB，微秒级）
+      await refreshBookmarks();
     } catch (e) {
       setBookmarkStatus(`书签删除失败：${String(e)}`);
       window.setTimeout(() => setBookmarkStatus(null), 1800);
