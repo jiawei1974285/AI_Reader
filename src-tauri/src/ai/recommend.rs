@@ -95,10 +95,16 @@ pub fn recommend(
         .ok_or_else(|| "锚定书未索引，无法推荐。先索引这本书。".to_string())?;
     let anchor_vec = books[anchor_idx].1.clone();
 
+    // C4: 拿 dismissed 集合，硬过滤——用户点过"不感兴趣"的不再推
+    let dismissed: std::collections::HashSet<i64> = db::list_dismissed_book_ids(conn)
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .collect();
+
     let mut scored: Vec<(usize, f32)> = books
         .iter()
         .enumerate()
-        .filter(|(i, _)| *i != anchor_idx)
+        .filter(|(i, (b, _))| *i != anchor_idx && !dismissed.contains(&b.id))
         .map(|(i, (_, v))| (i, embed::cosine(&anchor_vec, v)))
         .collect();
     scored.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));

@@ -118,6 +118,20 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session
   ON chat_messages(book_id, mode, spine_index, created_at);
 
+-- C4: 推荐反馈闭环 (CLAUDE.md 原则 9). 推荐之前是开环——基于"读过什么"
+-- 产出"应该读什么", 用户点踩 / 加入待读 / 已读完 都不进 DB. 加 book_signals
+-- 收回环, 推荐打分时减去 dismissed, 加权 queued/completed.
+-- signal ∈ {'dismissed','queued','completed','boosted'}
+CREATE TABLE IF NOT EXISTS book_signals (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    signal TEXT NOT NULL,
+    ts INTEGER NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_book_signals_book
+  ON book_signals(book_id, signal);
+
 -- C7: AI 对话沉淀。把 ChatPanel 里有价值的 AI 回答（连带它引用的片段）
 -- 落到表里，作为 "可重读的读书笔记"。比 chat_messages 高一级：chat_messages
 -- 是流水会话，可清；ai_notes 是用户显式标记 "这条值得留下" 的子集。
@@ -1473,6 +1487,74 @@ pub fn list_chunks(conn: &Connection, book_id: Option<i64>) -> rusqlite::Result<
         }
     }
     Ok(rows)
+}
+
+// ---------- C4: 推荐反馈闭环 (book_signals) ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BookSignal {
+    pub id: i64,
+    pub book_id: i64,
+    pub signal: String,
+    pub ts: i64,
+}
+
+/// 已知信号白名单——防 LLM 或前端 bug 灌脏数据。
+pub const ALLOWED_BOOK_SIGNALS: &[&str] =
+    &["dismissed", "queued", "completed", "boosted"];
+
+pub fn record_book_signal(
+    conn: &Connection,
+    book_id: i64,
+    signal: &str,
+    ts: i64,
+) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO book_signals (book_id, signal, ts) VALUES (?1, ?2, ?3)",
+        params![book_id, signal, ts],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// 删除某 (book, signal) 的所有记录——用户"取消屏蔽"时调。
+pub fn delete_book_signal(
+    conn: &Connection,
+    book_id: i64,
+    signal: &str,
+) -> rusqlite::Result<usize> {
+    let n = conn.execute(
+        "DELETE FROM book_signals WHERE book_id = ?1 AND signal = ?2",
+        params![book_id, signal],
+    )?;
+    Ok(n)
+}
+
+/// 拿"被打上 dismissed 标签"的所有 book_id。recommend 用它做硬过滤。
+pub fn list_dismissed_book_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT book_id FROM book_signals WHERE signal = 'dismissed'",
+    )?;
+    let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
+    rows.collect()
+}
+
+pub fn list_signals_for_book(
+    conn: &Connection,
+    book_id: i64,
+) -> rusqlite::Result<Vec<BookSignal>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, book_id, signal, ts FROM book_signals
+         WHERE book_id = ?1 ORDER BY ts DESC",
+    )?;
+    let rows = stmt.query_map(params![book_id], |row| {
+        Ok(BookSignal {
+            id: row.get(0)?,
+            book_id: row.get(1)?,
+            signal: row.get(2)?,
+            ts: row.get(3)?,
+        })
+    })?;
+    rows.collect()
 }
 
 // ---------- C7: AI 对话沉淀为笔记 ----------

@@ -1,6 +1,11 @@
 import { useEffect, useState } from "react";
 import { convertFileSrc } from "@tauri-apps/api/core";
-import { ipc, type Book, type Recommendation } from "@/lib/ipc";
+import {
+  ipc,
+  type Book,
+  type BookSignalKind,
+  type Recommendation,
+} from "@/lib/ipc";
 
 type Props = {
   onOpenBook: (book: Book) => void;
@@ -68,7 +73,7 @@ export function RecommendPanel({ onOpenBook, onClose }: Props) {
           {!loading && !error && recs.length > 0 && (
             <ul className="space-y-3">
               {recs.map((r, i) => (
-                <li key={r.book.id}>
+                <li key={r.book.id} className="relative group">
                   <button
                     onClick={() => onOpenBook(r.book)}
                     className="studio-card w-full text-left p-3 flex gap-3 items-start"
@@ -112,12 +117,90 @@ export function RecommendPanel({ onOpenBook, onClose }: Props) {
                       </p>
                     </div>
                   </button>
+                  {/* C4: 反馈按钮 — 点了之后立即从列表移除 */}
+                  <FeedbackRow
+                    bookId={r.book.id}
+                    onAfter={(kind) => {
+                      // dismissed / completed 都从列表移除 (用户已表明态度)
+                      if (kind === "dismissed" || kind === "completed") {
+                        setRecs((prev) =>
+                          prev.filter((x) => x.book.id !== r.book.id),
+                        );
+                      }
+                    }}
+                  />
                 </li>
               ))}
             </ul>
           )}
         </div>
       </aside>
+    </div>
+  );
+}
+
+/**
+ * C4: 推荐卡片右下角三按钮 — 不感兴趣 / 加入待读 / 已完成。
+ * 信号写进 book_signals 表; recommend 计算时硬过滤 dismissed (不再出现),
+ * queued/completed 现在只记录, 后续可以让 recommend 调权.
+ *
+ * 按 CLAUDE.md 原则 9 反馈控制: 闭环, 系统会随用户标记越来越准.
+ */
+function FeedbackRow({
+  bookId,
+  onAfter,
+}: {
+  bookId: number;
+  onAfter: (signal: BookSignalKind) => void;
+}) {
+  const [pending, setPending] = useState<BookSignalKind | null>(null);
+  async function send(signal: BookSignalKind) {
+    if (pending) return;
+    setPending(signal);
+    try {
+      await ipc.recordBookSignal(bookId, signal);
+      onAfter(signal);
+    } catch {
+      // 静默失败 — UX 上不打断
+    } finally {
+      setPending(null);
+    }
+  }
+  return (
+    <div className="flex items-center justify-end gap-1 px-1 py-1 mt-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          send("dismissed");
+        }}
+        disabled={!!pending}
+        className="text-[10px] px-1.5 py-0.5 rounded hover:bg-[var(--color-paper-edge)]/40"
+        title="不感兴趣 — 下次不再推荐"
+      >
+        👎
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          send("queued");
+        }}
+        disabled={!!pending}
+        className="text-[10px] px-1.5 py-0.5 rounded hover:bg-[var(--color-paper-edge)]/40"
+        title="加入待读"
+      >
+        📚
+      </button>
+      <button
+        onClick={(e) => {
+          e.stopPropagation();
+          send("completed");
+        }}
+        disabled={!!pending}
+        className="text-[10px] px-1.5 py-0.5 rounded hover:bg-[var(--color-paper-edge)]/40"
+        title="已读完"
+      >
+        ✓
+      </button>
     </div>
   );
 }

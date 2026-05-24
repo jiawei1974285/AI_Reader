@@ -385,6 +385,14 @@ async function mockInvoke<T>(
       return [] as T;
     case "delete_ai_note":
       return undefined as T;
+    case "record_book_signal":
+      return 1 as T;
+    case "delete_book_signal":
+      return 0 as T;
+    case "list_signals_for_book":
+      return [] as T;
+    case "list_dismissed_book_ids":
+      return [] as T;
     case "read_epub_preview":
     case "read_txt_initial":
     case "read_docx_initial":
@@ -778,6 +786,28 @@ export const ipc = {
     invoke<AiNote[]>("list_ai_notes_by_book", { bookId }),
   listAllAiNotes: () => invoke<AiNoteWithBook[]>("list_all_ai_notes"),
   deleteAiNote: (id: number) => invoke<void>("delete_ai_note", { id }),
+  // C4: 推荐反馈闭环
+  recordBookSignal: (bookId: number, signal: BookSignalKind) =>
+    invoke<number>("record_book_signal", { bookId, signal }),
+  deleteBookSignal: (bookId: number, signal: BookSignalKind) =>
+    invoke<number>("delete_book_signal", { bookId, signal }),
+  listSignalsForBook: (bookId: number) =>
+    invoke<BookSignal[]>("list_signals_for_book", { bookId }),
+  listDismissedBookIds: () =>
+    invoke<number[]>("list_dismissed_book_ids"),
+};
+
+export type BookSignalKind =
+  | "dismissed"
+  | "queued"
+  | "completed"
+  | "boosted";
+
+export type BookSignal = {
+  id: number;
+  book_id: number;
+  signal: BookSignalKind;
+  ts: number;
 };
 
 export type AiNote = {

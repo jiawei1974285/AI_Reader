@@ -478,6 +478,53 @@ pub struct DayReading {
     pub bookmarks: Vec<db::BookmarkWithBook>,
 }
 
+// ---------- C4: 推荐反馈闭环 ----------
+
+#[tauri::command]
+pub fn record_book_signal(
+    book_id: i64,
+    signal: String,
+    state: State<AppState>,
+) -> Result<i64, String> {
+    if !db::ALLOWED_BOOK_SIGNALS.contains(&signal.as_str()) {
+        return Err(format!(
+            "unknown signal: {signal} (allowed: {:?})",
+            db::ALLOWED_BOOK_SIGNALS
+        ));
+    }
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::record_book_signal(&conn, book_id, &signal, now_ms).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn delete_book_signal(
+    book_id: i64,
+    signal: String,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::delete_book_signal(&conn, book_id, &signal).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_signals_for_book(
+    book_id: i64,
+    state: State<AppState>,
+) -> Result<Vec<db::BookSignal>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::list_signals_for_book(&conn, book_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn list_dismissed_book_ids(state: State<AppState>) -> Result<Vec<i64>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::list_dismissed_book_ids(&conn).map_err(|e| e.to_string())
+}
+
 // ---------- C7: AI 对话沉淀 ----------
 
 #[tauri::command]

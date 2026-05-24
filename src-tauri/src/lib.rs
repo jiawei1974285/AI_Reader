@@ -154,6 +154,10 @@ pub fn run() {
             commands::list_ai_notes_by_book,
             commands::list_all_ai_notes,
             commands::delete_ai_note,
+            commands::record_book_signal,
+            commands::delete_book_signal,
+            commands::list_signals_for_book,
+            commands::list_dismissed_book_ids,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
