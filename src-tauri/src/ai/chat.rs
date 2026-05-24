@@ -558,13 +558,21 @@ pub async fn ai_chat_rag_stream(
 
     // Retrieve top-K chunks. Lock-then-fetch-then-drop, then score outside
     // the lock — see ai::index::fetch_chunks_for_search docstring.
-    let chunk_rows = {
+    // C3: 二阶段 RAG — cosine + BM25 用 RRF 融合. 锁内拿 chunks + bm25 hits,
+    //     释放锁后纯 CPU 算 RRF. BM25 取 32 候选; FTS 坏了/书没 index 时退化
+    //     为纯 cosine, 不阻塞 (CLAUDE.md 原则 14 兜底).
+    let q_for_fts = question.clone();
+    let (chunk_rows, bm25_hits) = {
         let conn = state.db.get().map_err(|e| e.to_string())?;
-        index::fetch_chunks_for_search(&conn, book_id)?
+        let rows = index::fetch_chunks_for_search(&conn, book_id)?;
+        let bm25 = db::search_fts(&conn, &q_for_fts, book_id, 32).unwrap_or_default();
+        (rows, bm25)
     };
-    let hits = tokio::task::spawn_blocking(move || index::score_chunks(&chunk_rows, &q_emb, 8))
-        .await
-        .map_err(|e| e.to_string())?;
+    let hits = tokio::task::spawn_blocking(move || {
+        index::hybrid_score(&chunk_rows, &q_emb, &bm25_hits, 8)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     if hits.is_empty() {
         return Err(
             "未找到相关内容。请先对本书进行索引（点击 AI 面板中的「索引本书」）。".to_string(),
@@ -1449,13 +1457,21 @@ pub async fn ai_chat_rag(
 
     // Retrieve top-K chunks. Same lock-then-score-outside pattern as the
     // streaming variant above.
-    let chunk_rows = {
+    // C3: 二阶段 RAG — cosine + BM25 用 RRF 融合. 锁内拿 chunks + bm25 hits,
+    //     释放锁后纯 CPU 算 RRF. BM25 取 32 候选; FTS 坏了/书没 index 时退化
+    //     为纯 cosine, 不阻塞 (CLAUDE.md 原则 14 兜底).
+    let q_for_fts = question.clone();
+    let (chunk_rows, bm25_hits) = {
         let conn = state.db.get().map_err(|e| e.to_string())?;
-        index::fetch_chunks_for_search(&conn, book_id)?
+        let rows = index::fetch_chunks_for_search(&conn, book_id)?;
+        let bm25 = db::search_fts(&conn, &q_for_fts, book_id, 32).unwrap_or_default();
+        (rows, bm25)
     };
-    let hits = tokio::task::spawn_blocking(move || index::score_chunks(&chunk_rows, &q_emb, 8))
-        .await
-        .map_err(|e| e.to_string())?;
+    let hits = tokio::task::spawn_blocking(move || {
+        index::hybrid_score(&chunk_rows, &q_emb, &bm25_hits, 8)
+    })
+    .await
+    .map_err(|e| e.to_string())?;
     if hits.is_empty() {
         return Err(
             "未找到相关内容。请先对本书进行索引（点击 AI 面板中的「索引本书」）。".to_string(),

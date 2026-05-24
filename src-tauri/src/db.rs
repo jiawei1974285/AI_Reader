@@ -1577,6 +1577,8 @@ pub fn delete_ai_note(conn: &Connection, id: i64) -> rusqlite::Result<()> {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct FtsHit {
+    /// C3: book_chunks.id（= FTS rowid），用于和 vector 召回去重做 RRF 融合
+    pub chunk_id: i64,
     pub book_id: i64,
     pub spine_index: i64,
     pub snippet: String,
@@ -1614,7 +1616,7 @@ pub fn search_fts(
         return Ok(Vec::new());
     }
     let sql = if book_id.is_some() {
-        "SELECT f.book_id, f.spine_index,
+        "SELECT f.rowid, f.book_id, f.spine_index,
                 snippet(book_chunks_fts, 0, '«', '»', '…', 24) AS snip,
                 b.title, b.author, b.format, b.file_path
          FROM book_chunks_fts f
@@ -1623,7 +1625,7 @@ pub fn search_fts(
          ORDER BY bm25(book_chunks_fts)
          LIMIT ?3"
     } else {
-        "SELECT f.book_id, f.spine_index,
+        "SELECT f.rowid, f.book_id, f.spine_index,
                 snippet(book_chunks_fts, 0, '«', '»', '…', 24) AS snip,
                 b.title, b.author, b.format, b.file_path
          FROM book_chunks_fts f
@@ -1635,13 +1637,14 @@ pub fn search_fts(
 
     let mapper = |row: &rusqlite::Row| {
         Ok(FtsHit {
-            book_id: row.get(0)?,
-            spine_index: row.get(1)?,
-            snippet: row.get(2)?,
-            book_title: row.get(3)?,
-            book_author: row.get(4)?,
-            book_format: row.get(5)?,
-            book_path: row.get(6)?,
+            chunk_id: row.get(0)?,
+            book_id: row.get(1)?,
+            spine_index: row.get(2)?,
+            snippet: row.get(3)?,
+            book_title: row.get(4)?,
+            book_author: row.get(5)?,
+            book_format: row.get(6)?,
+            book_path: row.get(7)?,
         })
     };
 

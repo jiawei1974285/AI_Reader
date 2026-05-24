@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ipc, type Book, type HighlightWithBook } from "@/lib/ipc";
 import { ReadingCalendar } from "@/features/calendar/ReadingCalendar";
+import { BarChart30Days } from "./BarChart30Days";
 
 type Props = {
   onBack: () => void;
@@ -128,6 +129,11 @@ export function StatsView({ onBack, onOpenBook }: Props) {
             sub="条"
           />
         </div>
+
+        {/* C2: 近 30 天柱图 — 一眼看出阅读节奏 */}
+        <Section title="近 30 天阅读">
+          <BarChart30Days days={30} />
+        </Section>
 
         {/* 读书日历 */}
         <Section title="读书日历">

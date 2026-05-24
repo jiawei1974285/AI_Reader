@@ -257,6 +257,7 @@ pub fn fetch_chunks_for_search(
 /// (model, dim) 不匹配的 chunk 直接跳过——之前的 `cosine(a, b) if a.len()
 /// != b.len()` 返回 0.0 是静默错误，用户察觉不到 RAG 在用过时数据。
 /// 现在跳过等于明确告诉用户「这些书需要用新模型重新索引」。
+#[allow(dead_code)] // C3 之后 production 路径走 hybrid_score; 保留作 fallback / 测试
 pub fn score_chunks(
     rows: &[db::ChunkRow],
     query_emb: &[f32],
@@ -273,6 +274,7 @@ pub fn score_chunks(
 
 /// 模型 + 维度感知的版本——主要给测试和未来"按模型分桶检索"用。
 /// 不匹配的 chunk 不会被算分（也不会被算成 0.0 混进 top-K）。
+#[allow(dead_code)] // 同上, 给测试和未来 "按模型分桶检索" 留接口
 pub fn score_chunks_for_model(
     rows: &[db::ChunkRow],
     query_emb: &[f32],
@@ -311,6 +313,85 @@ pub fn score_chunks_for_model(
             score,
         })
         .collect()
+}
+
+/// C3 — 二阶段 RAG: cosine（语义）+ BM25（词汇）用 Reciprocal Rank Fusion 融合.
+///
+/// 评审 P2 指出: 中文短查询纯向量召回不稳——"人间词话"如果嵌入空间里有
+/// 别的"哲学诗学"概念离得更近, 纯 cosine 会错排到前面. BM25 用三字 trigram
+/// 命中字面词, 纠偏.
+///
+/// 算法 (RRF, Cormack et al. 2009):
+///   score(d) = sum over methods m of 1 / (k + rank_m(d))
+///   k = 60 是论文里实测稳健的常数. RRF 对各源 score 绝对尺度不敏感,
+///   是 hybrid retrieval 的工业默认 (CLAUDE.md 原则 14 兜底).
+///
+/// 输入:
+///   - rows: 所有候选 chunks (来自 fetch_chunks_for_search)
+///   - query_emb: 问题嵌入向量
+///   - bm25_hits: FTS5 已经按 bm25 排序的列表 (search_fts 返回值, 前面 rank 越小)
+///   - top_k: 最终输出条数
+pub fn hybrid_score(
+    rows: &[db::ChunkRow],
+    query_emb: &[f32],
+    bm25_hits: &[db::FtsHit],
+    top_k: usize,
+) -> Vec<SearchHit> {
+    const RRF_K: f32 = 60.0;
+    let cosine_pool = (top_k * 4).max(16);
+    let dim_i64 = embed::CURRENT_EMBEDDING_DIM as i64;
+    let current_model = embed::CURRENT_EMBEDDING_MODEL_ID;
+
+    // 1. cosine 排名 (复用 score_chunks_for_model 的维度/模型过滤)
+    let mut cosine: Vec<(f32, &db::ChunkRow)> = rows
+        .iter()
+        .filter(|r| {
+            let dim_ok = r.embedding_dim.map(|d| d == dim_i64).unwrap_or(true);
+            let model_ok = r
+                .embedding_model
+                .as_deref()
+                .map(|m| m == current_model)
+                .unwrap_or(true);
+            dim_ok && model_ok
+        })
+        .map(|r| {
+            let emb = embed::blob_to_embedding(&r.embedding);
+            (embed::cosine(query_emb, &emb), r)
+        })
+        .collect();
+    cosine.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    cosine.truncate(cosine_pool);
+
+    // 2. RRF 累加: 任何 chunk 出现在任一池子就贡献
+    use std::collections::HashMap;
+    let mut rrf: HashMap<i64, f32> = HashMap::new();
+    for (idx, (_score, row)) in cosine.iter().enumerate() {
+        let rank = idx as f32 + 1.0;
+        *rrf.entry(row.id).or_insert(0.0) += 1.0 / (RRF_K + rank);
+    }
+    for (idx, hit) in bm25_hits.iter().enumerate() {
+        let rank = idx as f32 + 1.0;
+        *rrf.entry(hit.chunk_id).or_insert(0.0) += 1.0 / (RRF_K + rank);
+    }
+
+    // 3. 按融合分数取 top_k; 用 chunk_id 反查 ChunkRow 拿 text/spine_index
+    let by_id: HashMap<i64, &db::ChunkRow> =
+        rows.iter().map(|r| (r.id, r)).collect();
+    let mut ranked: Vec<(f32, i64)> = rrf.into_iter().map(|(id, s)| (s, id)).collect();
+    ranked.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut out: Vec<SearchHit> = Vec::with_capacity(top_k);
+    for (score, id) in ranked.into_iter().take(top_k) {
+        if let Some(row) = by_id.get(&id) {
+            out.push(SearchHit {
+                book_id: row.book_id,
+                spine_index: row.spine_index,
+                text: row.text.clone(),
+                score,
+            });
+        }
+    }
+    out
 }
 
 #[cfg(test)]
