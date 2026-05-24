@@ -78,7 +78,7 @@ fn run_rescan(app: &AppHandle) {
     let covers_dir = app_data.join("covers");
 
     let report = {
-        let Ok(conn) = state.db.lock() else { return };
+        let Ok(conn) = state.db.get() else { return };
         let Some(root) = crate::db::config_get(&conn, "library_root").ok().flatten() else {
             return;
         };

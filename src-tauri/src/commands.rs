@@ -9,13 +9,13 @@ use tauri::State;
 
 #[tauri::command]
 pub fn get_library_root(state: State<AppState>) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::config_get(&conn, "library_root").map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_library_root(path: String, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::config_set(&conn, "library_root", &path).map_err(|e| e.to_string())
 }
 
@@ -32,7 +32,7 @@ pub fn start_library_watcher(
     app: tauri::AppHandle,
 ) -> Result<bool, String> {
     let root_opt = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         db::config_get(&conn, "library_root").map_err(|e| e.to_string())?
     };
     let Some(root) = root_opt else {
@@ -55,20 +55,33 @@ pub fn start_library_watcher(
 }
 
 #[tauri::command]
+#[tracing::instrument(skip_all)]
 pub fn scan_library(state: State<AppState>, app: tauri::AppHandle) -> Result<ScanReport, String> {
     use tauri::Manager;
     let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
     let covers_dir = app_data.join("covers");
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     let root = db::config_get(&conn, "library_root")
         .map_err(|e| e.to_string())?
         .ok_or_else(|| "Library root not configured".to_string())?;
-    scanner::scan(&conn, &PathBuf::from(root), Some(&covers_dir))
+    let started = std::time::Instant::now();
+    let result = scanner::scan(&conn, &PathBuf::from(root), Some(&covers_dir));
+    match &result {
+        Ok(report) => tracing::info!(
+            scanned = report.scanned,
+            added_or_updated = report.added_or_updated,
+            removed = report.removed,
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "scan_library complete"
+        ),
+        Err(e) => tracing::warn!(error = %e, "scan_library failed"),
+    }
+    result
 }
 
 #[tauri::command]
 pub fn list_books(state: State<AppState>) -> Result<Vec<db::Book>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::list_books(&conn).map_err(|e| e.to_string())
 }
 
@@ -77,7 +90,7 @@ pub fn get_douban_metadata(
     book_id: i64,
     state: State<AppState>,
 ) -> Result<Option<db::DoubanMetadata>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::get_douban_metadata(&conn, book_id).map_err(|e| e.to_string())
 }
 
@@ -95,7 +108,7 @@ pub fn refresh_douban_metadata(
     use tauri::Manager;
     let force = force.unwrap_or(false);
     let books = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         db::list_books_for_douban_refresh(&conn, force).map_err(|e| e.to_string())?
     };
     let scheduled = books.len();
@@ -132,7 +145,7 @@ pub fn refresh_douban_metadata(
 /// if this becomes a frequent gripe.
 #[tauri::command]
 pub fn remove_book(book_id: i64, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM books WHERE id = ?1",
         rusqlite::params![book_id],
@@ -143,7 +156,7 @@ pub fn remove_book(book_id: i64, state: State<AppState>) -> Result<(), String> {
 
 #[tauri::command]
 pub fn get_book_by_path(path: String, state: State<AppState>) -> Result<Option<db::Book>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::get_book_by_path(&conn, &path).map_err(|e| e.to_string())
 }
 
@@ -152,23 +165,45 @@ pub fn get_progress(
     book_id: i64,
     state: State<AppState>,
 ) -> Result<Option<db::ReadingProgress>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::get_progress(&conn, book_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(
+    skip(state),
+    fields(book_id = book_id, spine = spine_index, para = paragraph_index)
+)]
 pub fn save_progress(
     book_id: i64,
     spine_index: i64,
     scroll_y: f64,
+    paragraph_index: Option<i64>,
+    char_offset: Option<i64>,
     state: State<AppState>,
 ) -> Result<(), String> {
     let now_ms = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_millis() as i64;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::save_progress(&conn, book_id, spine_index, scroll_y, now_ms).map_err(|e| e.to_string())
+    let started = std::time::Instant::now();
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let lock_ms = started.elapsed().as_millis() as u64;
+    if lock_ms > 50 {
+        // 高频调用，正常应 < 5ms。> 50 表示 RAG 检索或扫描占着 DB 锁
+        // (CLAUDE.md 原则 11 反馈环过长的早期信号)
+        tracing::warn!(lock_ms, "save_progress 拿到锁等待过长");
+    }
+    db::save_progress(
+        &conn,
+        book_id,
+        spine_index,
+        scroll_y,
+        paragraph_index,
+        char_offset,
+        now_ms,
+    )
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -184,7 +219,7 @@ pub fn create_bookmark(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_millis() as i64;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     let id = db::create_bookmark(
         &conn,
         book_id,
@@ -211,7 +246,7 @@ pub fn list_recent_bookmarks(
     limit: Option<i64>,
     state: State<AppState>,
 ) -> Result<Vec<db::BookmarkWithBook>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     let limit = limit.unwrap_or(100).clamp(1, 500);
     db::list_recent_bookmarks(&conn, limit).map_err(|e| e.to_string())
 }
@@ -221,25 +256,25 @@ pub fn list_bookmarks_by_book(
     book_id: i64,
     state: State<AppState>,
 ) -> Result<Vec<db::Bookmark>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::list_bookmarks_by_book(&conn, book_id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_bookmark(id: i64, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::delete_bookmark(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_reader_settings(state: State<AppState>) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::config_get(&conn, "reader_settings").map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_reader_settings(value: String, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::config_set(&conn, "reader_settings", &value).map_err(|e| e.to_string())
 }
 
@@ -259,7 +294,7 @@ pub fn create_highlight(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_millis() as i64;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     let id = db::create_highlight(
         &conn,
         book_id,
@@ -292,7 +327,7 @@ pub fn list_highlights_by_chapter(
     spine_index: i64,
     state: State<AppState>,
 ) -> Result<Vec<db::Highlight>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::list_highlights_by_chapter(&conn, book_id, spine_index).map_err(|e| e.to_string())
 }
 
@@ -301,7 +336,7 @@ pub fn list_highlights_by_book(
     book_id: i64,
     state: State<AppState>,
 ) -> Result<Vec<db::Highlight>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::list_highlights_by_book(&conn, book_id).map_err(|e| e.to_string())
 }
 
@@ -310,7 +345,7 @@ pub fn list_all_highlights(
     query: Option<String>,
     state: State<AppState>,
 ) -> Result<Vec<db::HighlightWithBook>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::list_all_highlights_with_book(&conn, query.as_deref()).map_err(|e| e.to_string())
 }
 
@@ -325,32 +360,32 @@ pub fn update_highlight(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_millis() as i64;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::update_highlight(&conn, id, &color, &note, now_ms).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn delete_highlight(id: i64, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::delete_highlight(&conn, id).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn get_music_root(state: State<AppState>) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::config_get(&conn, "music_root").map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn set_music_root(path: String, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::config_set(&conn, "music_root", &path).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
 pub fn scan_music(state: State<AppState>) -> Result<Vec<crate::music::scanner::Track>, String> {
     let root = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         db::config_get(&conn, "music_root")
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "音乐目录未配置".to_string())?
@@ -360,7 +395,7 @@ pub fn scan_music(state: State<AppState>) -> Result<Vec<crate::music::scanner::T
 
 #[tauri::command]
 pub fn list_track_tags(state: State<AppState>) -> Result<Vec<db::TrackTag>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::list_track_tag_meta(&conn).map_err(|e| e.to_string())
 }
 
@@ -371,7 +406,7 @@ pub fn chat_history_load(
     spine_index: i64,
     state: State<AppState>,
 ) -> Result<Vec<db::ChatHistoryMsg>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::list_chat_messages(&conn, book_id, &mode, spine_index).map_err(|e| e.to_string())
 }
 
@@ -388,7 +423,7 @@ pub fn chat_history_append(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| e.to_string())?
         .as_millis() as i64;
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::append_chat_message(&conn, book_id, &mode, spine_index, &role, &content, now_ms)
         .map_err(|e| e.to_string())
 }
@@ -397,10 +432,71 @@ pub fn chat_history_append(
 /// reader UI on a heartbeat (e.g. every 30 seconds while the page is
 /// visible). Frontend caps the delta to a sensible max so a stalled
 /// session can't bank false hours.
+///
+/// 读书日历: 当 `day_key` 不为 None 时同时往 `reading_sessions` 累加一条。
+/// `day_key` 由前端按用户本地时区算（YYYYMMDD 整数）—— 服务端不知道时区。
 #[tauri::command]
-pub fn add_read_time(book_id: i64, delta_ms: i64, state: State<AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::add_read_time(&conn, book_id, delta_ms).map_err(|e| e.to_string())
+pub fn add_read_time(
+    book_id: i64,
+    delta_ms: i64,
+    day_key: Option<i64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::add_read_time(&conn, book_id, delta_ms).map_err(|e| e.to_string())?;
+    if let Some(day) = day_key {
+        // 日历写入失败不让总累计也失败（双表是冗余兜底，原则 14）
+        if let Err(e) = db::add_reading_session(&conn, book_id, day, delta_ms, now_ms) {
+            tracing::warn!(error = %e, book_id, day, "reading_sessions 写入失败");
+        }
+    }
+    Ok(())
+}
+
+/// 读书日历月视图。前端传 [from_day, to_day]（YYYYMMDD），返回区间内
+/// 所有有阅读活动的天 + 当天总时长 + 涉及书数。
+#[tauri::command]
+pub fn list_calendar_days(
+    from_day: i64,
+    to_day: i64,
+    state: State<AppState>,
+) -> Result<Vec<db::CalendarDay>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::list_calendar_days(&conn, from_day, to_day).map_err(|e| e.to_string())
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct DayReading {
+    pub day_key: i64,
+    pub sessions: Vec<db::DaySessionEntry>,
+    pub highlights: Vec<db::HighlightWithBook>,
+    pub bookmarks: Vec<db::BookmarkWithBook>,
+}
+
+/// 当日阅读详情：阅读时长（按书）+ 创建的高亮 + 创建的书签。
+/// `start_ms` / `end_ms` 是当天本地时区的 [00:00, 次日00:00) epoch ms，
+/// 用于框定 highlights/bookmarks 的 created_at（按时间戳过滤更可靠）。
+#[tauri::command]
+pub fn get_day_reading(
+    day_key: i64,
+    start_ms: i64,
+    end_ms: i64,
+    state: State<AppState>,
+) -> Result<DayReading, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let sessions = db::list_day_sessions(&conn, day_key).map_err(|e| e.to_string())?;
+    let highlights = db::list_day_highlights(&conn, start_ms, end_ms).map_err(|e| e.to_string())?;
+    let bookmarks = db::list_day_bookmarks(&conn, start_ms, end_ms).map_err(|e| e.to_string())?;
+    Ok(DayReading {
+        day_key,
+        sessions,
+        highlights,
+        bookmarks,
+    })
 }
 
 #[tauri::command]
@@ -410,7 +506,7 @@ pub fn chat_history_clear(
     spine_index: i64,
     state: State<AppState>,
 ) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::clear_chat_messages(&conn, book_id, &mode, spine_index).map_err(|e| e.to_string())
 }
 

@@ -288,12 +288,17 @@ fn build_preview(
     // resolve in webview) or be deleted by strip_visual.
     let with_images = inline_images(doc, chapter_idref, &body);
     let cleaned = strip_visual(&with_images);
+    // A2 (CLAUDE.md 原则 13/14): 最后再过一次 ammonia 白名单。strip_visual
+    // 只防 <script>/<style>/<link>+部分 <img>，没防 on* 事件、javascript: URL、
+    // <iframe>、<form>、<object> 等。ammonia 用 html5ever 真正解析后按白名单
+    // 重建，是确定性而非启发式的。
+    let safe = crate::readers::sanitize::clean(&cleaned);
     Ok(EpubPreview {
         title,
         author,
         raw_length: raw.len(),
-        extracted_length: cleaned.len(),
-        html: cleaned,
+        extracted_length: safe.len(),
+        html: safe,
         spine_index,
         spine_total,
     })

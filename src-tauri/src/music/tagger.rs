@@ -42,7 +42,7 @@ pub async fn tag_all_tracks(
 ) -> Result<TagReport, String> {
     // Load tracks from current music_root
     let tracks: Vec<Track> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         let root = db::config_get(&conn, "music_root")
             .map_err(|e| e.to_string())?
             .ok_or_else(|| "音乐目录未配置".to_string())?;
@@ -60,7 +60,7 @@ pub async fn tag_all_tracks(
 
     // Filter out tracks already tagged with matching mtime
     let pending: Vec<&Track> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         tracks
             .iter()
             .filter(|t| match db::get_track_tag(&conn, &t.path).ok().flatten() {
@@ -105,7 +105,7 @@ pub async fn tag_all_tracks(
                     .map_err(|e| e.to_string())??;
 
                 let now_ms = chrono_now_ms();
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                let conn = state.db.get().map_err(|e| e.to_string())?;
                 for (i, item) in items.iter().enumerate() {
                     let Some(track) = batch.get(i) else { break };
                     let emb = embeddings

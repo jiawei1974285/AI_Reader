@@ -126,7 +126,7 @@ pub async fn recommend_with_reasons(
 ) -> Result<Vec<Recommendation>, String> {
     // Compute the KNN list synchronously while we hold the DB lock briefly.
     let (mut recs, anchor) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         let recs = recommend(&conn, anchor_book_id, top_k)?;
         // Find which anchor we ended up using so we can include it in the
         // prompt.
@@ -314,7 +314,7 @@ pub async fn recommend_music_for_chapter(
 
     // 3. Load all tagged tracks + score
     let candidates = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         db::list_all_track_tags(&conn).map_err(|e| e.to_string())?
     };
     if candidates.is_empty() {

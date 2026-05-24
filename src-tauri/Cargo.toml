@@ -26,6 +26,11 @@ serde_json = "1"
 epub = "2"
 regex = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
+# B3 (CLAUDE.md 原则 11 + 17): 全局 Mutex<Connection> 是反馈链最长的环。
+# r2d2 连接池让 RAG 检索和阅读时的高频 IPC（save_progress/add_read_time）
+# 走不同 connection，互相不阻塞。WAL 已经开了，读写并发安全。
+r2d2 = "0.8"
+r2d2_sqlite = "0.25"
 walkdir = "2"
 encoding_rs = "0.8"
 chardetng = "0.1"
@@ -40,6 +45,21 @@ notify = "8"
 notify-debouncer-full = "0.7"
 base64 = "0.22"
 pdf-extract = "0.10.0"
+# A2 (CLAUDE.md 原则 13/14): EPUB / MOBI 来源是任意第三方文件，不能信任。
+# `strip_visual` 之前仅靠正则去 <script>/<style>，没防 on* 事件属性、
+# javascript: URL、<iframe> 等。ammonia 是用 html5ever 做的真正解析+白名单。
+ammonia = "4"
+# A3 (CLAUDE.md 原则 14 + 16): API key 走 OS keystore，DB 里不存明文。
+# Windows → Credential Manager, macOS → Keychain, Linux → secret-service。
+keyring = { version = "3", features = [
+    "apple-native",
+    "windows-native",
+    "sync-secret-service",
+] }
+# A5 (CLAUDE.md 原则 8 能观测性): 关键路径打 span，rolling 写盘日志。
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender = "0.2"
 
 # Use a locally-patched fork of `mobi` 0.8 (see vendor/mobi-rs).
 # The upstream crate panics on real-world MOBI files when record offsets

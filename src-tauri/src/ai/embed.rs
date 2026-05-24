@@ -22,6 +22,13 @@ use std::sync::{Mutex, OnceLock};
 
 static MODEL: OnceLock<Mutex<Option<TextEmbedding>>> = OnceLock::new();
 
+/// B1 (CLAUDE.md 原则 16 自适应): 当前嵌入模型的稳定 ID。落到 `book_chunks.embedding_model`
+/// 列，将来想换模型（multilingual / BGE-M3）时按 (model, dim) 分桶检索，老 chunks
+/// 不会被算出 cosine=0 而静默全失效。**改模型时必须同时改这两个常量。**
+pub const CURRENT_EMBEDDING_MODEL_ID: &str = "BAAI/bge-small-zh-v1.5";
+/// 当前模型的向量维度。BGESmallZHV15 = 512。
+pub const CURRENT_EMBEDDING_DIM: usize = 512;
+
 fn slot() -> &'static Mutex<Option<TextEmbedding>> {
     MODEL.get_or_init(|| Mutex::new(None))
 }

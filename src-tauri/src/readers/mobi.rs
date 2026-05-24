@@ -645,12 +645,14 @@ pub fn read_mobi_chapter(path: String, spine_index: usize) -> Result<EpubPreview
         }
         let ch = &view.chapters[spine_index];
 
+        // A2: MOBI 来源同样不可信，过 ammonia 白名单。
+        let safe_html = crate::readers::sanitize::clean(&ch.html);
         Ok(EpubPreview {
             title: view.title,
             author: view.author,
             raw_length: view.body_len,
-            extracted_length: ch.html.len(),
-            html: ch.html.clone(),
+            extracted_length: safe_html.len(),
+            html: safe_html,
             spine_index,
             spine_total: total,
         })

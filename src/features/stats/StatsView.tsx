@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { ipc, type Book, type HighlightWithBook } from "@/lib/ipc";
+import { ReadingCalendar } from "@/features/calendar/ReadingCalendar";
 
 type Props = {
   onBack: () => void;
@@ -7,15 +8,16 @@ type Props = {
 };
 
 /**
- * Reading statistics page. Aggregates whatever the DB already gives us:
- *   - per-book reading time (books.read_time_ms)
+ * Reading statistics page. Aggregates:
+ *   - 读书日历（reading_sessions 表，按 day_key 分桶）
+ *   - per-book reading time (books.read_time_ms 累计)
  *   - last-read timestamp (books.last_read_at, from reading_progress JOIN)
  *   - total annotations across the library
  *   - per-category totals
  *
- * Daily / weekly time-series isn't here yet — we don't bucket read
- * heartbeats by day in the DB. Could be added later by extending the
- * `add_read_time` command to also write into a `read_time_daily` table.
+ * 日历组件本身在 features/calendar/ReadingCalendar.tsx —— 它自己拉
+ * list_calendar_days / get_day_reading，不依赖 StatsView 顶部的全量
+ * books/highlights 列表。
  */
 export function StatsView({ onBack, onOpenBook }: Props) {
   const [books, setBooks] = useState<Book[]>([]);
@@ -126,6 +128,11 @@ export function StatsView({ onBack, onOpenBook }: Props) {
             sub="条"
           />
         </div>
+
+        {/* 读书日历 */}
+        <Section title="读书日历">
+          <ReadingCalendar onOpenBook={onOpenBook} />
+        </Section>
 
         {/* Top by reading time */}
         <Section title="阅读时长榜单">

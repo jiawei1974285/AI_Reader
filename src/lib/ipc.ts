@@ -182,6 +182,10 @@ export type ReadingProgress = {
   spine_index: number;
   scroll_y: number;
   updated_at: number;
+  /** A4: 段落索引（章内第几段，0-based）。优先用它恢复进度。 */
+  paragraph_index?: number | null;
+  /** A4: 段内字符偏移。配合 paragraph_index 精确定位视口顶部。 */
+  char_offset?: number | null;
 };
 
 export type Bookmark = {
@@ -351,6 +355,15 @@ async function mockInvoke<T>(
     case "chat_history_clear":
     case "add_read_time":
       return undefined as T;
+    case "list_calendar_days":
+      return [] as T;
+    case "get_day_reading":
+      return {
+        day_key: Number(args?.dayKey ?? 0),
+        sessions: [],
+        highlights: [],
+        bookmarks: [],
+      } as T;
     case "read_epub_preview":
     case "read_txt_initial":
     case "read_docx_initial":
@@ -518,11 +531,19 @@ export const ipc = {
     invoke<Book | null>("get_book_by_path", { path }),
   getProgress: (bookId: number) =>
     invoke<ReadingProgress | null>("get_progress", { bookId }),
-  saveProgress: (bookId: number, spineIndex: number, scrollY: number) =>
+  saveProgress: (
+    bookId: number,
+    spineIndex: number,
+    scrollY: number,
+    paragraphIndex?: number | null,
+    charOffset?: number | null,
+  ) =>
     invoke<void>("save_progress", {
       bookId,
       spineIndex,
       scrollY,
+      paragraphIndex: paragraphIndex ?? null,
+      charOffset: charOffset ?? null,
     }),
   createBookmark: (args: {
     bookId: number;
@@ -643,9 +664,56 @@ export const ipc = {
   }) => invoke<void>("chat_history_append", args),
   chatHistoryClear: (bookId: number, mode: string, spineIndex: number) =>
     invoke<void>("chat_history_clear", { bookId, mode, spineIndex }),
-  addReadTime: (bookId: number, deltaMs: number) =>
-    invoke<void>("add_read_time", { bookId, deltaMs }),
+  addReadTime: (bookId: number, deltaMs: number, dayKey?: number | null) =>
+    invoke<void>("add_read_time", {
+      bookId,
+      deltaMs,
+      dayKey: dayKey ?? null,
+    }),
+  listCalendarDays: (fromDay: number, toDay: number) =>
+    invoke<CalendarDay[]>("list_calendar_days", { fromDay, toDay }),
+  getDayReading: (dayKey: number, startMs: number, endMs: number) =>
+    invoke<DayReading>("get_day_reading", { dayKey, startMs, endMs }),
 };
+
+/** 读书日历: YYYYMMDD 数字（如 20240115）= 本地时区当天。 */
+export type CalendarDay = {
+  day_key: number;
+  total_ms: number;
+  book_count: number;
+};
+
+export type DaySessionEntry = {
+  book_id: number;
+  book_title: string;
+  book_author: string;
+  book_format: string;
+  book_path: string;
+  read_time_ms: number;
+};
+
+export type DayReading = {
+  day_key: number;
+  sessions: DaySessionEntry[];
+  highlights: HighlightWithBook[];
+  bookmarks: BookmarkWithBook[];
+};
+
+/** 把 Date 转成 YYYYMMDD 整数（本地时区）。所有 day_key 都从这里来。 */
+export function dayKeyOf(d: Date): number {
+  const y = d.getFullYear();
+  const m = d.getMonth() + 1;
+  const day = d.getDate();
+  return y * 10000 + m * 100 + day;
+}
+
+/** 把 YYYYMMDD 数字还原成 Date（本地 00:00）。 */
+export function dateOfDayKey(dayKey: number): Date {
+  const y = Math.floor(dayKey / 10000);
+  const m = Math.floor((dayKey % 10000) / 100);
+  const d = dayKey % 100;
+  return new Date(y, m - 1, d, 0, 0, 0, 0);
+}
 
 export type ChatHistoryMsg = {
   role: string;

@@ -207,6 +207,9 @@ where
         }
         for (chunk_idx, (text, emb)) in chunks.iter().zip(embeddings.iter()).enumerate() {
             let blob = embed::embedding_to_blob(emb);
+            // B1: 每条 chunk 写入时打上「当前模型 + 维度」的烙印。
+            // emb.len() 就是这次嵌入实际产出的维度（理论上等于 CURRENT_EMBEDDING_DIM，
+            // 但万一以后 fastembed 版本变了，取实际更鲁棒）。
             db::insert_chunk(
                 &conn,
                 book_id,
@@ -214,6 +217,8 @@ where
                 chunk_idx as i64,
                 text,
                 &blob,
+                emb.len() as i64,
+                embed::CURRENT_EMBEDDING_MODEL_ID,
                 now_ms,
             )
             .map_err(|e| e.to_string())?;
@@ -243,17 +248,65 @@ pub struct SearchHit {
     pub score: f32,
 }
 
-/// Search the chunk DB by query embedding, return top-K hits by cosine
-/// similarity. If `book_id` is Some, restrict to that book.
-pub fn search_chunks(
+/// Fetch all chunks for a (book or whole-library) search. Owns its result
+/// so the caller can release the DB lock before doing the (CPU-bound)
+/// scoring step. See `score_chunks` for the compute half.
+///
+/// 按 CLAUDE.md 原则 11（时滞会引起振荡）：把 IO（持锁）和 CPU（不需锁）
+/// 拆成两步，调用方先 fetch 再 drop 锁再 score。这样 RAG 检索（数十~数百 ms
+/// 的余弦运算）不再阻塞滚动保存进度、保存高亮等 UI 高频 IPC。
+pub fn fetch_chunks_for_search(
     conn: &Connection,
-    query_emb: &[f32],
     book_id: Option<i64>,
+) -> Result<Vec<db::ChunkRow>, String> {
+    db::list_chunks(conn, book_id).map_err(|e| e.to_string())
+}
+
+/// Pure-CPU scoring: cosine-rank `rows` against `query_emb` and return
+/// top-K hits. Does not touch the DB — safe to call after the lock has
+/// been released.
+///
+/// B1 (CLAUDE.md 原则 16): 默认只对**当前模型**的 chunks 评分。其它
+/// (model, dim) 不匹配的 chunk 直接跳过——之前的 `cosine(a, b) if a.len()
+/// != b.len()` 返回 0.0 是静默错误，用户察觉不到 RAG 在用过时数据。
+/// 现在跳过等于明确告诉用户「这些书需要用新模型重新索引」。
+pub fn score_chunks(
+    rows: &[db::ChunkRow],
+    query_emb: &[f32],
     top_k: usize,
-) -> Result<Vec<SearchHit>, String> {
-    let rows = db::list_chunks(conn, book_id).map_err(|e| e.to_string())?;
+) -> Vec<SearchHit> {
+    score_chunks_for_model(
+        rows,
+        query_emb,
+        top_k,
+        embed::CURRENT_EMBEDDING_MODEL_ID,
+        embed::CURRENT_EMBEDDING_DIM,
+    )
+}
+
+/// 模型 + 维度感知的版本——主要给测试和未来"按模型分桶检索"用。
+/// 不匹配的 chunk 不会被算分（也不会被算成 0.0 混进 top-K）。
+pub fn score_chunks_for_model(
+    rows: &[db::ChunkRow],
+    query_emb: &[f32],
+    top_k: usize,
+    model_id: &str,
+    dim: usize,
+) -> Vec<SearchHit> {
+    let dim_i64 = dim as i64;
     let mut scored: Vec<(f32, &db::ChunkRow)> = rows
         .iter()
+        .filter(|r| {
+            // 维度必须匹配；model_id 如果 chunk 没记录（NULL）按"老数据"待定，
+            // 走维度匹配兜底。新数据（A 阶段以后）model_id 都有，能精确分流。
+            let dim_ok = r.embedding_dim.map(|d| d == dim_i64).unwrap_or(true);
+            let model_ok = r
+                .embedding_model
+                .as_deref()
+                .map(|m| m == model_id)
+                .unwrap_or(true);
+            dim_ok && model_ok
+        })
         .map(|r| {
             let emb = embed::blob_to_embedding(&r.embedding);
             let s = embed::cosine(query_emb, &emb);
@@ -261,7 +314,7 @@ pub fn search_chunks(
         })
         .collect();
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    Ok(scored
+    scored
         .into_iter()
         .take(top_k)
         .map(|(score, row)| SearchHit {
@@ -270,5 +323,79 @@ pub fn search_chunks(
             text: row.text.clone(),
             score,
         })
-        .collect())
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ai::embed;
+
+    fn make_row(id: i64, model: Option<&str>, dim: Option<i64>, emb: Vec<f32>) -> db::ChunkRow {
+        db::ChunkRow {
+            id,
+            book_id: 1,
+            spine_index: 0,
+            text: format!("chunk{id}"),
+            embedding: embed::embedding_to_blob(&emb),
+            embedding_dim: dim,
+            embedding_model: model.map(|s| s.to_string()),
+        }
+    }
+
+    #[test]
+    fn score_filters_out_mismatched_model() {
+        // Two chunks with current model + dim, one with a "future" model.
+        let query = vec![1.0f32, 0.0, 0.0];
+        let rows = vec![
+            make_row(1, Some(embed::CURRENT_EMBEDDING_MODEL_ID), Some(3), vec![1.0, 0.0, 0.0]),
+            make_row(2, Some(embed::CURRENT_EMBEDDING_MODEL_ID), Some(3), vec![0.9, 0.1, 0.0]),
+            // 不同模型的 chunk —— 必须被跳过，不能进 top-K
+            make_row(3, Some("OTHER/model-v2"), Some(3), vec![1.0, 0.0, 0.0]),
+        ];
+        let hits = score_chunks_for_model(&rows, &query, 5, embed::CURRENT_EMBEDDING_MODEL_ID, 3);
+        let ids: Vec<i64> = hits.iter().map(|h| h.book_id).collect();
+        // book_id 在 make_row 里都是 1，区分要看返回数量
+        assert_eq!(hits.len(), 2, "third chunk with foreign model should be skipped");
+        assert!(ids.iter().all(|&id| id == 1));
+    }
+
+    #[test]
+    fn score_filters_out_mismatched_dim() {
+        let query = vec![1.0f32, 0.0, 0.0];
+        let rows = vec![
+            make_row(1, Some(embed::CURRENT_EMBEDDING_MODEL_ID), Some(3), vec![1.0, 0.0, 0.0]),
+            // 同模型但维度不对 —— 跳过
+            make_row(2, Some(embed::CURRENT_EMBEDDING_MODEL_ID), Some(4), vec![1.0, 0.0, 0.0, 0.0]),
+        ];
+        let hits = score_chunks_for_model(&rows, &query, 5, embed::CURRENT_EMBEDDING_MODEL_ID, 3);
+        assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn score_keeps_legacy_null_metadata_chunks() {
+        // 老数据 NULL 的 chunk 默认按维度兜底（迁移已经回填 512 / model 名，但
+        // 测试这条逻辑保证哪怕未来某条没回填上，行为仍可预期：跟当前维度匹配
+        // 就当能算）。
+        let query = vec![1.0f32, 0.0, 0.0];
+        let rows = vec![
+            make_row(1, None, None, vec![1.0, 0.0, 0.0]),
+        ];
+        let hits = score_chunks_for_model(&rows, &query, 5, embed::CURRENT_EMBEDDING_MODEL_ID, 3);
+        assert_eq!(hits.len(), 1);
+    }
+}
+
+/// Convenience wrapper for tests and code paths that don't care about the
+/// fetch/score split. Holds the conn for the duration — do not use from
+/// command handlers where UI IPC could be blocked.
+#[cfg(test)]
+pub fn search_chunks(
+    conn: &Connection,
+    query_emb: &[f32],
+    book_id: Option<i64>,
+    top_k: usize,
+) -> Result<Vec<SearchHit>, String> {
+    let rows = fetch_chunks_for_search(conn, book_id)?;
+    Ok(score_chunks(&rows, query_emb, top_k))
 }

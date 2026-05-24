@@ -1,5 +1,5 @@
 import { useEffect } from "react";
-import { ipc } from "@/lib/ipc";
+import { dayKeyOf, ipc } from "@/lib/ipc";
 
 /**
  * Accumulate reading time for the current book while the reader view is
@@ -38,7 +38,9 @@ export function useReadTimeHeartbeat(bookId: number) {
       const delta = Math.min(now - lastTick, TICK_MS * 1.5);
       lastTick = now;
       if (delta > 1000) {
-        ipc.addReadTime(bookId, Math.floor(delta)).catch(() => {});
+        ipc
+          .addReadTime(bookId, Math.floor(delta), dayKeyOf(new Date()))
+          .catch(() => {});
       }
     }, TICK_MS);
 
@@ -48,7 +50,9 @@ export function useReadTimeHeartbeat(bookId: number) {
       if (visible) {
         const delta = Math.min(now - lastTick, TICK_MS * 1.5);
         if (delta > 1000) {
-          ipc.addReadTime(bookId, Math.floor(delta)).catch(() => {});
+          ipc
+          .addReadTime(bookId, Math.floor(delta), dayKeyOf(new Date()))
+          .catch(() => {});
         }
       }
       window.clearInterval(id);

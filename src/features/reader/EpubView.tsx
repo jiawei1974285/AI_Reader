@@ -22,6 +22,8 @@ import { LookupBubble } from "./LookupBubble";
 import { MusicSuggestPanel } from "./MusicSuggestPanel";
 import { useReadTimeHeartbeat } from "./useReadTimeHeartbeat";
 import { applyHighlights, captureSelection } from "./highlight";
+import { findViewportTopAnchor, scrollToAnchor } from "./progressAnchor";
+import { useReadingProgress } from "./useReadingProgress";
 import { BookSearch } from "./BookSearch";
 import { BookmarksPanel } from "./BookmarksPanel";
 import { ChapterEntitiesPanel } from "./ChapterEntitiesPanel";
@@ -117,7 +119,10 @@ export function EpubView({
   const [entitiesError, setEntitiesError] = useState<string | null>(null);
   const [activeEntityKey, setActiveEntityKey] = useState<string | null>(null);
   const [bookmarkStatus, setBookmarkStatus] = useState<string | null>(null);
-  const pendingInitialScroll = useRef<number | null>(initialScrollY ?? null);
+
+  // B2: 进度（初始 load / 恢复 / 滚动 throttle 保存）三件事抽到一个 hook。
+  // A4 引入的 paragraph_index/char_offset 在 hook 内部统一管。
+  const readingProgress = useReadingProgress();
 
   // Ctrl/Cmd+F opens the in-book search bar (current page only; pdf.js
   // Listen in CAPTURE phase + on window so WebView2's native find toolbar
@@ -281,21 +286,12 @@ export function EpubView({
 
     (async () => {
       try {
-        let initial: EpubPreview;
-        if (initialSpine !== undefined) {
-          // Caller specified a starting chapter (e.g. jump from notes view)
-          initial = await ipc.readBookChapter(path, initialSpine);
-          pendingInitialScroll.current = initialScrollY ?? 0;
-        } else {
-          const progress = await ipc.getProgress(bookId);
-          initial = progress
-            ? await ipc.readBookChapter(path, progress.spine_index)
-            : await ipc.readBookInitial(path);
-          pendingInitialScroll.current = progress?.scroll_y ?? 0;
-          if (!progress) {
-            ipc.saveProgress(bookId, initial.spine_index, 0).catch(() => {});
-          }
-        }
+        const initial = await readingProgress.loadInitialChapter({
+          path,
+          bookId,
+          initialSpine,
+          initialScrollY,
+        });
         if (cancelled) return;
         setChapters([initial]);
         setActiveIdx(initial.spine_index);
@@ -312,19 +308,42 @@ export function EpubView({
   }, [path, bookId, initialSpine, initialScrollY]);
 
   useEffect(() => {
-    const y = pendingInitialScroll.current;
-    if (!settingsReady || y == null || chapters.length === 0) return;
-    pendingInitialScroll.current = null;
+    const { anchor, scrollY: y } = readingProgress.restoreTarget;
+    if (!settingsReady || chapters.length === 0) return;
+    if (anchor == null && y === 0) return; // 没有需要恢复的目标
+    // 消费：一次性，避免后续 chapters 变更被重复触发
+    readingProgress.consumeRestoreTarget();
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
+        const root = scrollRef.current;
+        if (!root) return;
+        // A4: 优先按段落锚恢复；段落不存在 / 章节 DOM 没准备好时退回 scroll_y
+        if (anchor) {
+          const ch = chapters.find((c) => c.spine_index === activeIdx);
+          const chapterEl = ch
+            ? (chapterEls.current.get(ch.spine_index) ?? null)
+            : null;
+          if (
+            chapterEl &&
+            scrollToAnchor(
+              chapterEl,
+              root,
+              anchor.paragraphIndex,
+              anchor.charOffset,
+              isPagedMode,
+            )
+          ) {
+            return; // 成功，不再用 scroll_y
+          }
+        }
         if (isPagedMode) {
-          scrollRef.current?.scrollTo({ left: Math.max(0, y), top: 0 });
+          root.scrollTo({ left: Math.max(0, y), top: 0 });
         } else {
-          scrollRef.current?.scrollTo({ top: Math.max(0, y), left: 0 });
+          root.scrollTo({ top: Math.max(0, y), left: 0 });
         }
       });
     });
-  }, [chapters, isPagedMode, settingsReady]);
+  }, [chapters, isPagedMode, settingsReady, activeIdx, readingProgress]);
 
   useEffect(() => {
     if (!isPagedMode || chapters.length <= 1) return;
@@ -334,9 +353,16 @@ export function EpubView({
     setChapters([current]);
     requestAnimationFrame(() => {
       scrollRef.current?.scrollTo({ left: 0, top: 0 });
-      ipc.saveProgress(bookId, current.spine_index, 0).catch(() => {});
+      // A4: 章首 = paragraph 0
+      readingProgress.recordScrollPosition({
+        bookId,
+        spineIndex: current.spine_index,
+        scrollPixel: 0,
+        paragraphIndex: 0,
+        charOffset: 0,
+      });
     });
-  }, [activeIdx, bookId, chapters, isPagedMode]);
+  }, [activeIdx, bookId, chapters, isPagedMode, readingProgress]);
 
   // When opened with an initial highlight (jump from notes view), once both
   // the chapter and the highlight metadata are loaded, scroll to and flash
@@ -414,7 +440,18 @@ export function EpubView({
         if (isPagedMode) {
           setPageOffset(root.scrollLeft);
           setPageMaxOffset(Math.max(0, root.scrollWidth - root.clientWidth));
-          ipc.saveProgress(bookId, activeIdx, root.scrollLeft).catch(() => {});
+          // A4: 分页模式也找段落锚
+          const pagedEl = chapterEls.current.get(activeIdx);
+          const pagedAnchor = pagedEl
+            ? findViewportTopAnchor(pagedEl, root, true)
+            : null;
+          readingProgress.recordScrollPosition({
+            bookId,
+            spineIndex: activeIdx,
+            scrollPixel: root.scrollLeft,
+            paragraphIndex: pagedAnchor?.paragraphIndex ?? null,
+            charOffset: pagedAnchor?.charOffset ?? null,
+          });
           return;
         }
         const probe = root.scrollTop + 80;
@@ -425,7 +462,18 @@ export function EpubView({
           if (el.offsetTop <= probe) current = ch.spine_index;
         }
         if (current !== activeIdx) setActiveIdx(current);
-        ipc.saveProgress(bookId, current, root.scrollTop).catch(() => {});
+        // A4: 在当前 active chapter 里找视口顶部段落
+        const activeEl = chapterEls.current.get(current);
+        const anchor = activeEl
+          ? findViewportTopAnchor(activeEl, root, false)
+          : null;
+        readingProgress.recordScrollPosition({
+          bookId,
+          spineIndex: current,
+          scrollPixel: root.scrollTop,
+          paragraphIndex: anchor?.paragraphIndex ?? null,
+          charOffset: anchor?.charOffset ?? null,
+        });
       }, 400);
     };
 

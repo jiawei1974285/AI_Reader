@@ -1,5 +1,6 @@
 use crate::ai::{embed, index, recommend};
 use crate::db;
+use crate::secrets;
 use crate::state::AppState;
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -217,14 +218,23 @@ mod tests {
 }
 
 fn load_config(state: &State<'_, AppState>) -> Result<AiConfig, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    let raw = db::config_get(&conn, "ai_settings")
-        .map_err(|e| e.to_string())?
-        .ok_or_else(|| {
-            "AI 设置未配置：请在设置中填入 base_url / api_key / chat_model".to_string()
-        })?;
-    let cfg: AiConfig =
+    let raw = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        db::config_get(&conn, "ai_settings")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| {
+                "AI 设置未配置：请在设置中填入 base_url / api_key / chat_model".to_string()
+            })?
+    };
+    let mut cfg: AiConfig =
         serde_json::from_str(&raw).map_err(|e| format!("AI 设置 JSON 解析失败: {e}"))?;
+    // A3: api_key 走 OS keystore，DB 里不再存。如果 cfg.api_key 是空（新版
+    // 路径），从 keystore 取；如果非空（旧版 DB 里还残留明文），认这个值。
+    if cfg.api_key.trim().is_empty() {
+        cfg.api_key = secrets::get(secrets::ACCOUNT_AI_API_KEY)
+            .map_err(|e| format!("从 keystore 读 api_key 失败: {e}"))?
+            .unwrap_or_default();
+    }
     if cfg.base_url.trim().is_empty() {
         return Err("base_url 未配置".to_string());
     }
@@ -546,11 +556,15 @@ pub async fn ai_chat_rag_stream(
         .next()
         .ok_or_else(|| "嵌入查询失败".to_string())?;
 
-    // Retrieve top-K chunks
-    let hits = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        index::search_chunks(&conn, &q_emb, book_id, 8)?
+    // Retrieve top-K chunks. Lock-then-fetch-then-drop, then score outside
+    // the lock — see ai::index::fetch_chunks_for_search docstring.
+    let chunk_rows = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        index::fetch_chunks_for_search(&conn, book_id)?
     };
+    let hits = tokio::task::spawn_blocking(move || index::score_chunks(&chunk_rows, &q_emb, 8))
+        .await
+        .map_err(|e| e.to_string())?;
     if hits.is_empty() {
         return Err(
             "未找到相关内容。请先对本书进行索引（点击 AI 面板中的「索引本书」）。".to_string(),
@@ -728,12 +742,16 @@ fn strip_thinking(s: &str) -> String {
 /// ai_chat_rag_stream. Sets `stream: true` on the request, reads the SSE
 /// response chunk-by-chunk, parses `delta.content`, and emits Tauri
 /// events.
+#[tracing::instrument(skip_all, fields(session_id = %session_id, model = %cfg.chat_model))]
 async fn stream_chat_to_events(
     cfg: &AiConfig,
     messages: &[ChatMessage],
     session_id: &str,
     app: AppHandle,
 ) -> Result<(), String> {
+    let started = std::time::Instant::now();
+    let mut first_token_at: Option<std::time::Duration> = None;
+    let mut total_chars: usize = 0;
     let url = format!("{}/v1/chat/completions", cfg.base_url.trim_end_matches('/'));
     let body = StreamingChatRequest {
         model: &cfg.chat_model,
@@ -830,6 +848,12 @@ async fn stream_chat_to_events(
                             error: None,
                         },
                     );
+                    tracing::info!(
+                        total_chars,
+                        ttfb_ms = first_token_at.map(|d| d.as_millis() as u64).unwrap_or(0),
+                        total_ms = started.elapsed().as_millis() as u64,
+                        "stream complete (DONE)"
+                    );
                     return Ok(());
                 }
                 if let Ok(parsed) = serde_json::from_str::<StreamChunk>(payload) {
@@ -838,6 +862,15 @@ async fn stream_chat_to_events(
                             if !content.is_empty() {
                                 let visible = stripper.feed(&content);
                                 if !visible.is_empty() {
+                                    if first_token_at.is_none() {
+                                        let ttfb = started.elapsed();
+                                        first_token_at = Some(ttfb);
+                                        tracing::info!(
+                                            ttfb_ms = ttfb.as_millis() as u64,
+                                            "first token from LLM"
+                                        );
+                                    }
+                                    total_chars += visible.chars().count();
                                     let _ = app.emit(
                                         "chat-delta",
                                         ChatDelta {
@@ -878,19 +911,106 @@ async fn stream_chat_to_events(
             error: None,
         },
     );
+    tracing::info!(
+        total_chars,
+        ttfb_ms = first_token_at.map(|d| d.as_millis() as u64).unwrap_or(0),
+        total_ms = started.elapsed().as_millis() as u64,
+        "stream complete (no DONE marker)"
+    );
     Ok(())
 }
 
+/// 前端拿到的是「合并视图」：base_url/chat_model/temperature/fast_mode 来自
+/// SQLite，api_key 来自 OS keystore。返回 JSON 字符串保持原有 IPC 契约不变
+/// （前端 `loadAiSettings` 仍然能 `JSON.parse` 出完整的 AiSettings 对象）。
 #[tauri::command]
 pub fn get_ai_settings(state: State<'_, AppState>) -> Result<Option<String>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::config_get(&conn, "ai_settings").map_err(|e| e.to_string())
+    let raw_opt = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        db::config_get(&conn, "ai_settings").map_err(|e| e.to_string())?
+    };
+    let Some(raw) = raw_opt else {
+        return Ok(None);
+    };
+    // 解析→把 api_key 字段替换成 keystore 里的值→再序列化回去
+    let mut v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(Some(raw)),
+    };
+    let key = secrets::get(secrets::ACCOUNT_AI_API_KEY).unwrap_or(None);
+    if let Some(obj) = v.as_object_mut() {
+        match key {
+            Some(k) => {
+                obj.insert("api_key".to_string(), serde_json::Value::String(k));
+            }
+            None => {
+                obj.insert("api_key".to_string(), serde_json::Value::String(String::new()));
+            }
+        }
+    }
+    Ok(Some(v.to_string()))
 }
 
+/// 拆 JSON：api_key 进 keystore，其余字段（清空 api_key 后）落 SQLite。
+/// 这样 SQLite 备份 / 同步盘里再也看不到密钥（CLAUDE.md 原则 14 冗余兜底）。
 #[tauri::command]
 pub fn set_ai_settings(value: String, state: State<'_, AppState>) -> Result<(), String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
-    db::config_set(&conn, "ai_settings", &value).map_err(|e| e.to_string())
+    let mut v: serde_json::Value =
+        serde_json::from_str(&value).map_err(|e| format!("AI 设置 JSON 解析失败: {e}"))?;
+
+    // 取出并 redact api_key
+    let api_key = v
+        .as_object_mut()
+        .and_then(|o| o.remove("api_key"))
+        .and_then(|val| val.as_str().map(|s| s.to_string()))
+        .unwrap_or_default();
+
+    // 写 keystore（空字符串 = 删除条目）
+    secrets::set(secrets::ACCOUNT_AI_API_KEY, api_key.trim())
+        .map_err(|e| format!("保存 api_key 到 keystore 失败: {e}"))?;
+
+    // 在 SQLite 里把 api_key 字段恢复为空串（保留字段位以兼容老前端解析）
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("api_key".to_string(), serde_json::Value::String(String::new()));
+    }
+    let redacted = v.to_string();
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::config_set(&conn, "ai_settings", &redacted).map_err(|e| e.to_string())
+}
+
+/// 一次性迁移：把旧版本写在 SQLite ai_settings JSON 里的 api_key 迁到
+/// keystore，并把 DB 里的字段清空。幂等——已经迁过的（DB 里 api_key 为空）
+/// 直接跳过。`lib.rs::run()` 启动时调一次。
+pub fn migrate_api_key_to_keystore(db_conn: &rusqlite::Connection) -> Result<(), String> {
+    let Some(raw) = db::config_get(db_conn, "ai_settings").map_err(|e| e.to_string())? else {
+        return Ok(());
+    };
+    let mut v: serde_json::Value = match serde_json::from_str(&raw) {
+        Ok(v) => v,
+        Err(_) => return Ok(()), // 损坏的 JSON 让 set_ai_settings 下次覆盖
+    };
+    let legacy_key = v
+        .as_object_mut()
+        .and_then(|o| o.get("api_key"))
+        .and_then(|val| val.as_str())
+        .map(|s| s.to_string())
+        .unwrap_or_default();
+    if legacy_key.trim().is_empty() {
+        return Ok(()); // 已经迁过 / 从未配置
+    }
+    // 只有当 keystore 没有更新的值时才覆盖（防退化）
+    let existing = secrets::get(secrets::ACCOUNT_AI_API_KEY).ok().flatten();
+    if existing.as_deref().map(|s| s.trim()).unwrap_or("").is_empty() {
+        secrets::set(secrets::ACCOUNT_AI_API_KEY, legacy_key.trim())
+            .map_err(|e| format!("迁移 api_key 到 keystore 失败: {e}"))?;
+        tracing::info!("已把旧版 SQLite 里的 api_key 迁移到 OS keystore");
+    }
+    // 不管怎样，把 DB 里的 api_key 清掉（即使 keystore 写失败，也别让明文久留）
+    if let Some(obj) = v.as_object_mut() {
+        obj.insert("api_key".to_string(), serde_json::Value::String(String::new()));
+    }
+    db::config_set(db_conn, "ai_settings", &v.to_string()).map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -913,6 +1033,7 @@ fn cache_and_db_paths(app: &AppHandle) -> Result<(std::path::PathBuf, std::path:
 /// then cached. Emits `index-progress` events keyed on book_id so the UI
 /// can render a progress bar.
 #[tauri::command]
+#[tracing::instrument(skip(state, app, book_path), fields(book_id))]
 pub async fn ai_index_book(
     book_id: i64,
     book_path: String,
@@ -979,7 +1100,7 @@ pub async fn ai_summarize_highlights(
 ) -> Result<String, String> {
     // Gather highlights + book metadata in one DB session
     let (title, author, highlights) = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         let books = db::list_books(&conn).map_err(|e| e.to_string())?;
         let book = books
             .into_iter()
@@ -1042,7 +1163,7 @@ pub fn ai_get_index_status(
     book_id: i64,
     state: State<'_, AppState>,
 ) -> Result<Option<db::BookIndexStatus>, String> {
-    let conn = state.db.lock().map_err(|e| e.to_string())?;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
     db::get_index_status(&conn, book_id).map_err(|e| e.to_string())
 }
 
@@ -1088,7 +1209,7 @@ pub async fn ai_classify_books(
     let force = force.unwrap_or(false);
 
     let all_books: Vec<db::Book> = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         db::list_books(&conn).map_err(|e| e.to_string())?
     };
     let total = all_books.len();
@@ -1159,7 +1280,7 @@ pub async fn ai_classify_books(
 
         match result {
             Ok(cats) => {
-                let conn = state.db.lock().map_err(|e| e.to_string())?;
+                let conn = state.db.get().map_err(|e| e.to_string())?;
                 for (i, cat) in cats.iter().enumerate() {
                     if let Some(b) = batch.get(i) {
                         let normalized = normalize_category(cat);
@@ -1255,12 +1376,12 @@ pub async fn ai_recommend_books(
                 // If reasons step itself errored (e.g. AI unconfigured),
                 // fall back to bare recommendations so the panel still
                 // shows something useful.
-                let conn = state.db.lock().map_err(|err| err.to_string())?;
+                let conn = state.db.get().map_err(|err| err.to_string())?;
                 recommend::recommend(&conn, anchor_book_id, top_k).map_err(|_| e)
             }
         }
     } else {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
+        let conn = state.db.get().map_err(|e| e.to_string())?;
         recommend::recommend(&conn, anchor_book_id, top_k)
     }
 }
@@ -1293,11 +1414,15 @@ pub async fn ai_chat_rag(
         .next()
         .ok_or_else(|| "嵌入查询失败".to_string())?;
 
-    // Retrieve top-K chunks
-    let hits = {
-        let conn = state.db.lock().map_err(|e| e.to_string())?;
-        index::search_chunks(&conn, &q_emb, book_id, 8)?
+    // Retrieve top-K chunks. Same lock-then-score-outside pattern as the
+    // streaming variant above.
+    let chunk_rows = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        index::fetch_chunks_for_search(&conn, book_id)?
     };
+    let hits = tokio::task::spawn_blocking(move || index::score_chunks(&chunk_rows, &q_emb, 8))
+        .await
+        .map_err(|e| e.to_string())?;
     if hits.is_empty() {
         return Err(
             "未找到相关内容。请先对本书进行索引（点击 AI 面板中的「索引本书」）。".to_string(),
