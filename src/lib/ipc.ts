@@ -364,6 +364,15 @@ async function mockInvoke<T>(
         highlights: [],
         bookmarks: [],
       } as T;
+    case "detect_calibre_library":
+      return null as T;
+    case "import_calibre_library":
+      return {
+        scanned: 0,
+        imported: 0,
+        skipped_no_format: 0,
+        skipped_missing_file: 0,
+      } as T;
     case "read_epub_preview":
     case "read_txt_initial":
     case "read_docx_initial":
@@ -723,9 +732,26 @@ export const ipc = {
     invoke<string[]>("remove_book_tag", { bookId, tag }),
   listAllBookTags: () =>
     invoke<BookTagRow[]>("list_all_book_tags"),
+  // C8: Calibre 库直连
+  detectCalibreLibrary: (path: string) =>
+    invoke<CalibreLibraryInfo | null>("detect_calibre_library", { path }),
+  importCalibreLibrary: (path: string) =>
+    invoke<CalibreImportReport>("import_calibre_library", { path }),
 };
 
 export type BookTagRow = { book_id: number; tag: string };
+
+export type CalibreLibraryInfo = {
+  root: string;
+  book_count: number;
+};
+
+export type CalibreImportReport = {
+  scanned: number;
+  imported: number;
+  skipped_no_format: number;
+  skipped_missing_file: number;
+};
 
 /** 读书日历: YYYYMMDD 数字（如 20240115）= 本地时区当天。 */
 export type CalendarDay = {

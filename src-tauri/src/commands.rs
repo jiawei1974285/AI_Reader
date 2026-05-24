@@ -1,4 +1,5 @@
 use crate::db;
+use crate::library::calibre;
 use crate::library::douban;
 use crate::library::scanner::{self, ScanReport};
 use crate::library::watcher;
@@ -475,6 +476,33 @@ pub struct DayReading {
     pub sessions: Vec<db::DaySessionEntry>,
     pub highlights: Vec<db::HighlightWithBook>,
     pub bookmarks: Vec<db::BookmarkWithBook>,
+}
+
+// ---------- C8: Calibre 库直连导入 ----------
+
+#[tauri::command]
+pub fn detect_calibre_library(path: String) -> Option<calibre::CalibreLibraryInfo> {
+    calibre::detect_calibre_library(Path::new(&path))
+}
+
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub fn import_calibre_library(
+    path: String,
+    state: State<AppState>,
+) -> Result<calibre::CalibreImportReport, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let started = std::time::Instant::now();
+    let report = calibre::import_calibre_library(&conn, Path::new(&path))?;
+    tracing::info!(
+        scanned = report.scanned,
+        imported = report.imported,
+        skipped_no_format = report.skipped_no_format,
+        skipped_missing_file = report.skipped_missing_file,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "calibre import complete"
+    );
+    Ok(report)
 }
 
 /// 当日阅读详情：阅读时长（按书）+ 创建的高亮 + 创建的书签。

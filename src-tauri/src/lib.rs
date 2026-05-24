@@ -144,6 +144,8 @@ pub fn run() {
             commands::add_book_tag,
             commands::remove_book_tag,
             commands::list_all_book_tags,
+            commands::detect_calibre_library,
+            commands::import_calibre_library,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

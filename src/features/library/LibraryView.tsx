@@ -266,6 +266,42 @@ export function LibraryView({
     ipc.startLibraryWatcher().catch(() => {});
   }
 
+  // C8: 从 Calibre 库目录一键导入（不替代书库根，只往 books 表灌新行）
+  async function importFromCalibre() {
+    if (!isTauriRuntime()) {
+      setError("Calibre 导入只在桌面应用中可用。");
+      return;
+    }
+    setError(null);
+    const picked = await openDialog({ directory: true, multiple: false });
+    if (!picked || typeof picked !== "string") return;
+    setScanning(true);
+    try {
+      const info = await ipc.detectCalibreLibrary(picked);
+      if (!info) {
+        setError(
+          "这个目录不像是 Calibre 库（找不到 metadata.db）。请选包含 metadata.db 的目录。",
+        );
+        return;
+      }
+      const report = await ipc.importCalibreLibrary(picked);
+      const parts = [
+        `Calibre ${info.book_count} 本`,
+        `导入 ${report.imported}`,
+      ];
+      if (report.skipped_no_format > 0)
+        parts.push(`跳过无可读格式 ${report.skipped_no_format}`);
+      if (report.skipped_missing_file > 0)
+        parts.push(`文件缺失 ${report.skipped_missing_file}`);
+      setLastReport(parts.join(" · "));
+      setBooks(await ipc.listBooks());
+    } catch (e) {
+      setError(`Calibre 导入失败：${String(e)}`);
+    } finally {
+      setScanning(false);
+    }
+  }
+
   async function rescan() {
     setScanning(true);
     setError(null);
@@ -579,6 +615,14 @@ export function LibraryView({
           </button>
           <button onClick={pickRoot} className="studio-button">
             换目录
+          </button>
+          <button
+            onClick={importFromCalibre}
+            disabled={scanning}
+            className="studio-button"
+            title="选 Calibre 库目录（含 metadata.db）一键导入"
+          >
+            从 Calibre 导入
           </button>
         </div>
       </header>
