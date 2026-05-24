@@ -1251,10 +1251,13 @@ pub async fn ai_classify_books(
             };
             listing.push_str(&format!("{}. 《{}》/ {}\n", i + 1, b.title, author));
         }
+        // B4: ask for 1-3 tags per book (主标签 + 可选副标签).
+        // 主标签写回 books.category 维持老 UI 兼容；全部标签写入 book_tags.
         let prompt = format!(
-            "请为以下 {n} 本书各分配一个最合适的分类。\n\
-             分类必须从这个列表里选一个（不要其他选项，不要解释）：\n[{allowed}]\n\n\
-             只输出 JSON 数组 [\"分类1\", \"分类2\", ...]，顺序与下方列表完全一致。\n\n\
+            "请为以下 {n} 本书各分配 1 到 3 个最合适的分类标签 (越契合越靠前)。\n\
+             每个标签必须从这个列表里选 (不要其他选项, 不要解释)：\n[{allowed}]\n\n\
+             只输出 JSON, 形如 [[\"主标签\"], [\"主标签\", \"副标签\"], …]\n\
+             外层数组顺序与下方书目完全一致, 每本书对应一个标签数组 (1-3 个).\n\n\
              书目：\n{listing}",
             n = batch.len(),
             allowed = allowed_list,
@@ -1262,7 +1265,8 @@ pub async fn ai_classify_books(
         let messages = vec![
             ChatMessage {
                 role: "system".to_string(),
-                content: "你是一个图书分类员。".to_string(),
+                content: "你是一个图书分类员, 擅长用多标签描述一本书的题材."
+                    .to_string(),
             },
             ChatMessage {
                 role: "user".to_string(),
@@ -1270,21 +1274,50 @@ pub async fn ai_classify_books(
             },
         ];
 
-        let result: Result<Vec<String>, String> = (async {
+        let result: Result<Vec<Vec<String>>, String> = (async {
             let reply = ai_chat(messages, state.clone()).await?;
             let cleaned = strip_code_fence(&reply);
-            serde_json::from_str::<Vec<String>>(&cleaned)
-                .map_err(|e| format!("解析失败: {e}; 原文: {cleaned}"))
+            // 优先按二维数组解析; 老格式 (一维字符串数组) 兜底转换。
+            if let Ok(arr) = serde_json::from_str::<Vec<Vec<String>>>(&cleaned) {
+                Ok(arr)
+            } else {
+                let flat: Vec<String> = serde_json::from_str(&cleaned)
+                    .map_err(|e| format!("解析失败: {e}; 原文: {cleaned}"))?;
+                Ok(flat.into_iter().map(|s| vec![s]).collect())
+            }
         })
         .await;
 
         match result {
-            Ok(cats) => {
-                let conn = state.db.get().map_err(|e| e.to_string())?;
-                for (i, cat) in cats.iter().enumerate() {
+            Ok(tag_lists) => {
+                // B3 池: state.db.get() 返回 PooledConnection (实现 DerefMut)，
+                // db::set_book_tags 需要 &mut Connection，所以 conn 加 mut。
+                let mut conn = state.db.get().map_err(|e| e.to_string())?;
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_millis() as i64)
+                    .unwrap_or(0);
+                for (i, raw_tags) in tag_lists.iter().enumerate() {
                     if let Some(b) = batch.get(i) {
-                        let normalized = normalize_category(cat);
-                        if let Err(_e) = db::set_book_category(&conn, b.id, &normalized) {
+                        let normalized = db::normalize_tags(raw_tags);
+                        // 兜底: 一个标签也没识别到 → 退到 normalize_category
+                        // (保证老行为不漏 — 至少有一个 "其他").
+                        let final_tags = if normalized.is_empty() {
+                            let one = raw_tags
+                                .first()
+                                .map(|s| normalize_category(s))
+                                .unwrap_or_else(|| "其他".to_string());
+                            vec![one]
+                        } else {
+                            normalized
+                        };
+                        let write_res = db::set_book_tags(
+                            &mut conn, b.id, &final_tags, "ai", now_ms,
+                        );
+                        // 同步主标签 (books.category) 以兼容老 UI.
+                        let cat = final_tags.first().cloned().unwrap_or_default();
+                        let cat_res = db::set_book_category(&conn, b.id, &cat);
+                        if write_res.is_err() || cat_res.is_err() {
                             failed += 1;
                         } else {
                             classified += 1;

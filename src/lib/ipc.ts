@@ -509,6 +509,44 @@ async function mockInvoke<T>(
         skipped: 0,
         failed: 0,
       } as T;
+    case "list_book_tags": {
+      const bookId = Number(args?.bookId ?? 0);
+      const raw = storage?.getItem(`preview_book_tags_${bookId}`);
+      if (raw) return JSON.parse(raw) as T;
+      const book = mockBooks.find((b) => b.id === bookId);
+      return (book?.category ? [book.category] : []) as T;
+    }
+    case "set_book_tags": {
+      const bookId = Number(args?.bookId ?? 0);
+      const tags = (args?.tags as string[] | undefined) ?? [];
+      storage?.setItem(`preview_book_tags_${bookId}`, JSON.stringify(tags));
+      return tags as T;
+    }
+    case "add_book_tag": {
+      const bookId = Number(args?.bookId ?? 0);
+      const tag = String(args?.tag ?? "");
+      const raw = storage?.getItem(`preview_book_tags_${bookId}`);
+      const existing = raw ? (JSON.parse(raw) as string[]) : [];
+      if (tag && !existing.includes(tag)) existing.push(tag);
+      storage?.setItem(`preview_book_tags_${bookId}`, JSON.stringify(existing));
+      return existing as T;
+    }
+    case "remove_book_tag": {
+      const bookId = Number(args?.bookId ?? 0);
+      const tag = String(args?.tag ?? "");
+      const raw = storage?.getItem(`preview_book_tags_${bookId}`);
+      const existing = raw ? (JSON.parse(raw) as string[]) : [];
+      const next = existing.filter((t) => t !== tag);
+      storage?.setItem(`preview_book_tags_${bookId}`, JSON.stringify(next));
+      return next as T;
+    }
+    case "list_all_book_tags": {
+      const out: { book_id: number; tag: string }[] = [];
+      for (const b of mockBooks) {
+        if (b.category) out.push({ book_id: b.id, tag: b.category });
+      }
+      return out as T;
+    }
     case "chat_history_load":
       return [] as T;
     default:
@@ -674,7 +712,20 @@ export const ipc = {
     invoke<CalendarDay[]>("list_calendar_days", { fromDay, toDay }),
   getDayReading: (dayKey: number, startMs: number, endMs: number) =>
     invoke<DayReading>("get_day_reading", { dayKey, startMs, endMs }),
+  // B4: per-book tags
+  listBookTags: (bookId: number) =>
+    invoke<string[]>("list_book_tags", { bookId }),
+  setBookTags: (bookId: number, tags: string[], source: "ai" | "user" = "user") =>
+    invoke<string[]>("set_book_tags", { bookId, tags, source }),
+  addBookTag: (bookId: number, tag: string, source: "ai" | "user" = "user") =>
+    invoke<string[]>("add_book_tag", { bookId, tag, source }),
+  removeBookTag: (bookId: number, tag: string) =>
+    invoke<string[]>("remove_book_tag", { bookId, tag }),
+  listAllBookTags: () =>
+    invoke<BookTagRow[]>("list_all_book_tags"),
 };
+
+export type BookTagRow = { book_id: number; tag: string };
 
 /** 读书日历: YYYYMMDD 数字（如 20240115）= 本地时区当天。 */
 export type CalendarDay = {

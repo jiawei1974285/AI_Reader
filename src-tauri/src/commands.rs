@@ -510,6 +510,84 @@ pub fn chat_history_clear(
     db::clear_chat_messages(&conn, book_id, &mode, spine_index).map_err(|e| e.to_string())
 }
 
+// ---------- B4: per-book tags ----------
+
+#[tauri::command]
+pub fn list_book_tags(book_id: i64, state: State<AppState>) -> Result<Vec<String>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::list_book_tags(&conn, book_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_book_tags(
+    book_id: i64,
+    tags: Vec<String>,
+    source: String,
+    state: State<AppState>,
+) -> Result<Vec<String>, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+    let normalized = db::normalize_tags(&tags);
+    let mut conn = state.db.get().map_err(|e| e.to_string())?;
+    db::set_book_tags(&mut conn, book_id, &normalized, &source, now_ms)
+        .map_err(|e| e.to_string())?;
+    // 同步主标签 (books.category) — 第一个标签作为兼容性主类目。
+    let primary = normalized.first().cloned().unwrap_or_default();
+    db::set_book_category(&conn, book_id, &primary).map_err(|e| e.to_string())?;
+    Ok(normalized)
+}
+
+#[tauri::command]
+pub fn add_book_tag(
+    book_id: i64,
+    tag: String,
+    source: String,
+    state: State<AppState>,
+) -> Result<Vec<String>, String> {
+    let now_ms = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_millis() as i64;
+    // Snap a single tag through the same whitelist normalizer.
+    let snapped = db::normalize_tags(&[tag]);
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    if let Some(t) = snapped.first() {
+        db::add_book_tag(&conn, book_id, t, &source, now_ms).map_err(|e| e.to_string())?;
+        // Keep `books.category` as the first tag if it was empty —
+        // otherwise the chip filter on the old UI would silently lose
+        // newly added books from the user's view.
+        let existing = db::list_book_tags(&conn, book_id).map_err(|e| e.to_string())?;
+        if let Some(first) = existing.first() {
+            db::set_book_category(&conn, book_id, first).map_err(|e| e.to_string())?;
+        }
+    }
+    db::list_book_tags(&conn, book_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn remove_book_tag(
+    book_id: i64,
+    tag: String,
+    state: State<AppState>,
+) -> Result<Vec<String>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::remove_book_tag(&conn, book_id, &tag).map_err(|e| e.to_string())?;
+    let remaining = db::list_book_tags(&conn, book_id).map_err(|e| e.to_string())?;
+    // Rewrite the primary `books.category` to the new first tag (or "")
+    // so the legacy filter stays consistent.
+    let primary = remaining.first().cloned().unwrap_or_default();
+    db::set_book_category(&conn, book_id, &primary).map_err(|e| e.to_string())?;
+    Ok(remaining)
+}
+
+#[tauri::command]
+pub fn list_all_book_tags(state: State<AppState>) -> Result<Vec<db::BookTagRow>, String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::list_all_book_tags(&conn).map_err(|e| e.to_string())
+}
+
 /// Decrypt a NetEase `.ncm` audio file into our music cache and return
 /// the absolute path of the decrypted (mp3/flac) file. Subsequent calls
 /// for the same source hit the cache instantly.

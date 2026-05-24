@@ -131,6 +131,19 @@ CREATE TABLE IF NOT EXISTS reading_sessions (
 
 CREATE INDEX IF NOT EXISTS idx_reading_sessions_day
   ON reading_sessions(day_key);
+
+-- B4: multi-tag per book. `source` ∈ {'ai','user'}. `books.category`
+-- 字段保留作为「主标签」(向后兼容老 UI)，但真值落在这里。
+CREATE TABLE IF NOT EXISTS book_tags (
+    book_id INTEGER NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    tag TEXT NOT NULL,
+    source TEXT NOT NULL DEFAULT 'user',
+    created_at INTEGER NOT NULL,
+    PRIMARY KEY(book_id, tag)
+);
+
+CREATE INDEX IF NOT EXISTS idx_book_tags_tag ON book_tags(tag);
+CREATE INDEX IF NOT EXISTS idx_book_tags_book ON book_tags(book_id);
 "#;
 
 /// B3: 在一条 `Connection` 上跑 schema + 增量 ALTER。被 `open()`（独立调用，
@@ -1245,6 +1258,127 @@ pub fn list_track_tag_meta(conn: &Connection) -> rusqlite::Result<Vec<TrackTag>>
     Ok(rows)
 }
 
+// ---------- B4: per-book tags ----------
+
+/// Allowed tag whitelist. Anything outside this list gets dropped during
+/// `normalize_tags`. Mirrors the frontend `BOOK_CATEGORIES` constant —
+/// keep in sync.
+pub const ALLOWED_BOOK_TAGS: &[&str] = &[
+    "文学小说",
+    "历史",
+    "哲学",
+    "科技",
+    "经管",
+    "心理",
+    "艺术",
+    "诗歌散文",
+    "教材工具书",
+    "传记",
+    "其他",
+];
+
+/// Normalize a raw tag list from the LLM (or a user paste): trim, drop
+/// empty / non-whitelisted entries, dedup while preserving first-seen
+/// order. Returns at most 3 tags (我们只允许多打 3 个标签，太多失去
+/// "信号 vs 数据堆" 的意义 —— 原则 19).
+pub fn normalize_tags(raw: &[String]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for r in raw {
+        let t = r.trim();
+        if t.is_empty() {
+            continue;
+        }
+        // Snap to whitelist: exact match wins; otherwise substring match
+        // against any allowed tag (covers cases like "历史 / 文化" or
+        // "科技与未来").
+        let snapped: Option<&str> = ALLOWED_BOOK_TAGS
+            .iter()
+            .copied()
+            .find(|c| *c == t)
+            .or_else(|| ALLOWED_BOOK_TAGS.iter().copied().find(|c| t.contains(c)));
+        if let Some(s) = snapped {
+            if !out.iter().any(|x| x == s) {
+                out.push(s.to_string());
+            }
+        }
+    }
+    if out.len() > 3 {
+        out.truncate(3);
+    }
+    out
+}
+
+pub fn list_book_tags(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT tag FROM book_tags WHERE book_id = ?1 ORDER BY created_at ASC, tag ASC",
+    )?;
+    let rows = stmt.query_map(params![book_id], |row| row.get::<_, String>(0))?;
+    rows.collect()
+}
+
+pub fn set_book_tags(
+    conn: &mut Connection,
+    book_id: i64,
+    tags: &[String],
+    source: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM book_tags WHERE book_id = ?1", params![book_id])?;
+    for tag in tags {
+        tx.execute(
+            "INSERT OR IGNORE INTO book_tags (book_id, tag, source, created_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![book_id, tag, source, now_ms],
+        )?;
+    }
+    tx.commit()
+}
+
+pub fn add_book_tag(
+    conn: &Connection,
+    book_id: i64,
+    tag: &str,
+    source: &str,
+    now_ms: i64,
+) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO book_tags (book_id, tag, source, created_at)
+         VALUES (?1, ?2, ?3, ?4)",
+        params![book_id, tag, source, now_ms],
+    )?;
+    Ok(())
+}
+
+pub fn remove_book_tag(conn: &Connection, book_id: i64, tag: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "DELETE FROM book_tags WHERE book_id = ?1 AND tag = ?2",
+        params![book_id, tag],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct BookTagRow {
+    pub book_id: i64,
+    pub tag: String,
+}
+
+/// Bulk-load tags for many books in one query — used by `list_books`
+/// shaped views that want to attach tags without N+1.
+pub fn list_all_book_tags(conn: &Connection) -> rusqlite::Result<Vec<BookTagRow>> {
+    let mut stmt = conn.prepare(
+        "SELECT book_id, tag FROM book_tags ORDER BY book_id, created_at ASC",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(BookTagRow {
+            book_id: row.get(0)?,
+            tag: row.get(1)?,
+        })
+    })?;
+    rows.collect()
+}
+
 /// Load chunks for one or all indexed books. If `book_id` is Some, scopes
 /// to that book; if None, returns chunks from every book in the library.
 ///
@@ -1284,4 +1418,54 @@ pub fn list_chunks(conn: &Connection, book_id: Option<i64>) -> rusqlite::Result<
         }
     }
     Ok(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_tags_dedup_and_whitelist() {
+        let raw: Vec<String> = vec![
+            "历史".into(),
+            "历史".into(), // dup
+            "科技".into(),
+            "外星玄学".into(), // not in whitelist → dropped
+            "".into(),         // empty → dropped
+        ];
+        let out = normalize_tags(&raw);
+        assert_eq!(out, vec!["历史".to_string(), "科技".to_string()]);
+    }
+
+    #[test]
+    fn normalize_tags_snaps_substring_to_whitelist() {
+        let raw: Vec<String> = vec![
+            "历史 / 文化".into(), // contains "历史" → snap
+            "科技与未来".into(),  // contains "科技" → snap
+        ];
+        let out = normalize_tags(&raw);
+        assert_eq!(out, vec!["历史".to_string(), "科技".to_string()]);
+    }
+
+    #[test]
+    fn normalize_tags_caps_at_three() {
+        let raw: Vec<String> = vec![
+            "历史".into(),
+            "科技".into(),
+            "哲学".into(),
+            "心理".into(),
+        ];
+        let out = normalize_tags(&raw);
+        assert_eq!(out.len(), 3);
+        assert_eq!(
+            out,
+            vec!["历史".to_string(), "科技".to_string(), "哲学".to_string()]
+        );
+    }
+
+    #[test]
+    fn normalize_tags_empty_input_yields_empty() {
+        let out = normalize_tags(&[]);
+        assert!(out.is_empty());
+    }
 }

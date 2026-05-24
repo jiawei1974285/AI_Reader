@@ -139,6 +139,11 @@ pub fn run() {
             commands::add_read_time,
             commands::list_calendar_days,
             commands::get_day_reading,
+            commands::list_book_tags,
+            commands::set_book_tags,
+            commands::add_book_tag,
+            commands::remove_book_tag,
+            commands::list_all_book_tags,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

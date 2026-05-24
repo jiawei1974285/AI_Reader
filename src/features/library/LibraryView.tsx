@@ -6,6 +6,7 @@ import {
   isTauriRuntime,
   type Book,
   type BookmarkWithBook,
+  type BookTagRow,
   type ClassifyProgress,
 } from "@/lib/ipc";
 import { BookCard } from "./BookCard";
@@ -82,11 +83,29 @@ export function LibraryView({
   const [recommendOpen, setRecommendOpen] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
   const [bookmarkQuery, setBookmarkQuery] = useState("");
-  const [activeCategory, setActiveCategory] = useState<string | null>(
-    () => localStorage.getItem("library_category") || null,
-  );
+  // B4: multi-select tag filter. Default UX is single-select (chip click
+  // replaces selection); shift+click adds/removes from the set (OR
+  // filter). Empty set = "全部" — no tag constraint.
+  const [activeCategories, setActiveCategories] = useState<Set<string>>(() => {
+    const raw = localStorage.getItem("library_category");
+    if (!raw) return new Set();
+    if (raw.startsWith("[")) {
+      try {
+        const arr = JSON.parse(raw) as string[];
+        return new Set(arr);
+      } catch {
+        return new Set();
+      }
+    }
+    return new Set([raw]);
+  });
   const [activeFormat, setActiveFormat] = useState<Book["format"] | null>(
     () => (localStorage.getItem("library_format") as Book["format"]) || null,
+  );
+  // book_id → tag[] for OR-filtering across multiple tags. Loaded once
+  // and re-loaded on library-changed events.
+  const [tagsByBook, setTagsByBook] = useState<Map<number, string[]>>(
+    new Map(),
   );
 
   // Library scroll position is preserved across navigations (reader →
@@ -114,10 +133,19 @@ export function LibraryView({
   }, [sortKey]);
 
   useEffect(() => {
-    if (activeCategory)
-      localStorage.setItem("library_category", activeCategory);
-    else localStorage.removeItem("library_category");
-  }, [activeCategory]);
+    if (activeCategories.size === 0) {
+      localStorage.removeItem("library_category");
+    } else if (activeCategories.size === 1) {
+      // Single-select: store as bare string for back-compat.
+      const [only] = activeCategories;
+      localStorage.setItem("library_category", only);
+    } else {
+      localStorage.setItem(
+        "library_category",
+        JSON.stringify([...activeCategories]),
+      );
+    }
+  }, [activeCategories]);
 
   useEffect(() => {
     if (activeFormat) localStorage.setItem("library_format", activeFormat);
@@ -140,6 +168,27 @@ export function LibraryView({
     restoredScrollRef.current = true;
   }, [books]);
 
+  // Refresh both books and the bulk tag map. Tags live in their own
+  // table now (B4); the legacy `books.category` is just a primary tag
+  // mirror for back-compat. We OR-merge both signals so filter chips
+  // still find books even if the AI tagger hasn't run yet.
+  async function refreshTagsMap(): Promise<Map<number, string[]>> {
+    try {
+      const rows: BookTagRow[] = await ipc.listAllBookTags();
+      const m = new Map<number, string[]>();
+      for (const r of rows) {
+        const list = m.get(r.book_id) ?? [];
+        list.push(r.tag);
+        m.set(r.book_id, list);
+      }
+      setTagsByBook(m);
+      return m;
+    } catch {
+      setTagsByBook(new Map());
+      return new Map();
+    }
+  }
+
   useEffect(() => {
     (async () => {
       try {
@@ -149,6 +198,7 @@ export function LibraryView({
           const list = await ipc.listBooks();
           setBooks(list);
           setBookmarks(await ipc.listRecentBookmarks(500));
+          await refreshTagsMap();
           ipc.startLibraryWatcher().catch(() => {});
         }
       } catch (e) {
@@ -176,6 +226,7 @@ export function LibraryView({
         try {
           setBooks(await ipc.listBooks());
           setBookmarks(await ipc.listRecentBookmarks(500));
+          await refreshTagsMap();
         } catch {
           /* best effort */
         }
@@ -228,6 +279,7 @@ export function LibraryView({
       setLastReport(parts.join(" · "));
       setBooks(await ipc.listBooks());
       setBookmarks(await ipc.listRecentBookmarks(500));
+      await refreshTagsMap();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -248,6 +300,7 @@ export function LibraryView({
       setLastReport(parts.join(" · "));
       setBooks(await ipc.listBooks());
       setBookmarks(await ipc.listRecentBookmarks(500));
+      await refreshTagsMap();
     } catch (e) {
       setError(String(e));
     } finally {
@@ -268,6 +321,23 @@ export function LibraryView({
           })
         : books.slice();
 
+      // Tag bag per book: union of B4 `book_tags` table + legacy
+      // `books.category` (so books that the AI hasn't re-classified yet
+      // still show up under their old single category).
+      const tagsFor = (b: Book): string[] => {
+        const fromTable = tagsByBook.get(b.id) ?? [];
+        const legacy = b.category && b.category.trim() ? [b.category] : [];
+        const merged = new Set<string>([...fromTable, ...legacy]);
+        return merged.size === 0 ? ["未分类"] : [...merged];
+      };
+
+      const matchesActiveCats = (b: Book): boolean => {
+        if (activeCategories.size === 0) return true;
+        const t = tagsFor(b);
+        for (const x of t) if (activeCategories.has(x)) return true;
+        return false;
+      };
+
       // Dependent counts (facet aware): each facet's counts are computed
       // *after* the OTHER facet has been applied, so the number on each chip
       // is honest about what clicking it would yield.
@@ -276,17 +346,15 @@ export function LibraryView({
           ? searched
           : searched.filter((b) => b.format === activeFormat);
       const fmtFiltered =
-        activeCategory === null
+        activeCategories.size === 0
           ? searched
-          : searched.filter((b) => {
-              const k = b.category && b.category.trim() ? b.category : "未分类";
-              return k === activeCategory;
-            });
+          : searched.filter(matchesActiveCats);
 
       const catCounts = new Map<string, number>();
       for (const b of catFiltered) {
-        const k = b.category && b.category.trim() ? b.category : "未分类";
-        catCounts.set(k, (catCounts.get(k) ?? 0) + 1);
+        for (const k of tagsFor(b)) {
+          catCounts.set(k, (catCounts.get(k) ?? 0) + 1);
+        }
       }
       const fmtCounts = new Map<Book["format"], number>();
       for (const b of fmtFiltered) {
@@ -295,11 +363,8 @@ export function LibraryView({
 
       // Then both filters together for the actual grid.
       let result = searched;
-      if (activeCategory !== null) {
-        result = result.filter((b) => {
-          const k = b.category && b.category.trim() ? b.category : "未分类";
-          return k === activeCategory;
-        });
+      if (activeCategories.size > 0) {
+        result = result.filter(matchesActiveCats);
       }
       if (activeFormat !== null) {
         result = result.filter((b) => b.format === activeFormat);
@@ -331,7 +396,7 @@ export function LibraryView({
         formatCounts: fmtCounts,
         totalsAfterSearch: searched.length,
       };
-    }, [books, activeCategory, activeFormat, searchQuery, sortKey]);
+    }, [books, activeCategories, activeFormat, searchQuery, sortKey, tagsByBook]);
 
   const orderedCategories = useMemo(() => {
     const out: string[] = [];
@@ -585,18 +650,30 @@ export function LibraryView({
                 分类
               </span>
               <button
-                onClick={() => setActiveCategory(null)}
-                className={`studio-chip ${activeCategory === null ? "studio-chip-active" : ""}`}
+                onClick={() => setActiveCategories(new Set())}
+                className={`studio-chip ${activeCategories.size === 0 ? "studio-chip-active" : ""}`}
               >
                 全部
               </button>
               {orderedCategories.map((cat) => (
                 <button
                   key={cat}
-                  onClick={() =>
-                    setActiveCategory((prev) => (prev === cat ? null : cat))
-                  }
-                  className={`studio-chip ${activeCategory === cat ? "studio-chip-active" : ""}`}
+                  // B4: shift+click 多选 (OR filter)；普通 click 单选 / 取消。
+                  onClick={(e) => {
+                    setActiveCategories((prev) => {
+                      const next = new Set(prev);
+                      if (e.shiftKey) {
+                        if (next.has(cat)) next.delete(cat);
+                        else next.add(cat);
+                        return next;
+                      }
+                      // 普通 click：当前唯一选中再点 = 取消；否则替换为这一个
+                      if (next.size === 1 && next.has(cat)) return new Set();
+                      return new Set([cat]);
+                    });
+                  }}
+                  className={`studio-chip ${activeCategories.has(cat) ? "studio-chip-active" : ""}`}
+                  title={`点击切换 · Shift+点击多选`}
                 >
                   {cat} · {categoryCounts.get(cat) ?? 0}
                 </button>
