@@ -60,6 +60,8 @@ keyring = { version = "3", features = [
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
+# C10: 高亮导出 EPUB。最小 zip 即可，不要 bzip2/zstd 等高压缩，省掉系统依赖。
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 # Use a locally-patched fork of `mobi` 0.8 (see vendor/mobi-rs).
 # The upstream crate panics on real-world MOBI files when record offsets

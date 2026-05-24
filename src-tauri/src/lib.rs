@@ -1,6 +1,7 @@
 mod ai;
 mod commands;
 mod db;
+mod export;
 mod library;
 mod music;
 mod readers;
@@ -146,6 +147,8 @@ pub fn run() {
             commands::list_all_book_tags,
             commands::detect_calibre_library,
             commands::import_calibre_library,
+            commands::export_highlights_epub,
+            commands::export_highlights_csv,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

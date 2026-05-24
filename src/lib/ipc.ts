@@ -373,6 +373,9 @@ async function mockInvoke<T>(
         skipped_no_format: 0,
         skipped_missing_file: 0,
       } as T;
+    case "export_highlights_epub":
+    case "export_highlights_csv":
+      return 0 as T;
     case "read_epub_preview":
     case "read_txt_initial":
     case "read_docx_initial":
@@ -737,6 +740,11 @@ export const ipc = {
     invoke<CalibreLibraryInfo | null>("detect_calibre_library", { path }),
   importCalibreLibrary: (path: string) =>
     invoke<CalibreImportReport>("import_calibre_library", { path }),
+  // C10: 导出高亮
+  exportHighlightsEpub: (bookId: number, outputPath: string) =>
+    invoke<number>("export_highlights_epub", { bookId, outputPath }),
+  exportHighlightsCsv: (bookId: number | null, outputPath: string) =>
+    invoke<number>("export_highlights_csv", { bookId, outputPath }),
 };
 
 export type BookTagRow = { book_id: number; tag: string };

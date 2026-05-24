@@ -478,6 +478,97 @@ pub struct DayReading {
     pub bookmarks: Vec<db::BookmarkWithBook>,
 }
 
+// ---------- C10: 导出高亮 EPUB / CSV ----------
+
+#[tauri::command]
+pub fn export_highlights_epub(
+    book_id: i64,
+    output_path: String,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    let (title, author, highlights) = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        let books = db::list_books(&conn).map_err(|e| e.to_string())?;
+        let book = books
+            .into_iter()
+            .find(|b| b.id == book_id)
+            .ok_or_else(|| "找不到这本书".to_string())?;
+        let hs_plain =
+            db::list_highlights_by_book(&conn, book_id).map_err(|e| e.to_string())?;
+        // 把 Highlight 升级成 HighlightWithBook（统一 export 模块的入参）
+        let hs: Vec<db::HighlightWithBook> = hs_plain
+            .into_iter()
+            .map(|h| db::HighlightWithBook {
+                id: h.id,
+                book_id: h.book_id,
+                spine_index: h.spine_index,
+                selected_text: h.selected_text,
+                prefix: h.prefix,
+                suffix: h.suffix,
+                color: h.color,
+                note: h.note,
+                created_at: h.created_at,
+                updated_at: h.updated_at,
+                book_title: book.title.clone(),
+                book_author: book.author.clone(),
+                book_format: book.format.clone(),
+            })
+            .collect();
+        (book.title, book.author, hs)
+    };
+    if highlights.is_empty() {
+        return Err("本书还没有标注可以导出。".to_string());
+    }
+    crate::export::export_to_epub(Path::new(&output_path), &title, &author, &highlights)?;
+    Ok(highlights.len())
+}
+
+#[tauri::command]
+pub fn export_highlights_csv(
+    book_id: Option<i64>,
+    output_path: String,
+    state: State<AppState>,
+) -> Result<usize, String> {
+    let highlights = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        if let Some(bid) = book_id {
+            // 拼出 HighlightWithBook
+            let book = db::list_books(&conn)
+                .map_err(|e| e.to_string())?
+                .into_iter()
+                .find(|b| b.id == bid)
+                .ok_or_else(|| "找不到这本书".to_string())?;
+            let plain =
+                db::list_highlights_by_book(&conn, bid).map_err(|e| e.to_string())?;
+            plain
+                .into_iter()
+                .map(|h| db::HighlightWithBook {
+                    id: h.id,
+                    book_id: h.book_id,
+                    spine_index: h.spine_index,
+                    selected_text: h.selected_text,
+                    prefix: h.prefix,
+                    suffix: h.suffix,
+                    color: h.color,
+                    note: h.note,
+                    created_at: h.created_at,
+                    updated_at: h.updated_at,
+                    book_title: book.title.clone(),
+                    book_author: book.author.clone(),
+                    book_format: book.format.clone(),
+                })
+                .collect()
+        } else {
+            db::list_all_highlights_with_book(&conn, None).map_err(|e| e.to_string())?
+        }
+    };
+    if highlights.is_empty() {
+        return Err("没有任何标注可以导出。".to_string());
+    }
+    crate::export::export_to_csv(Path::new(&output_path), &highlights)?;
+    Ok(highlights.len())
+}
+
 // ---------- C8: Calibre 库直连导入 ----------
 
 #[tauri::command]

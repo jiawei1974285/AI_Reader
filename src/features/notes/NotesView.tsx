@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { ipc, type Book, type HighlightWithBook } from "@/lib/ipc";
+import { save as saveDialog } from "@tauri-apps/plugin-dialog";
+import { ipc, isTauriRuntime, type Book, type HighlightWithBook } from "@/lib/ipc";
 import {
   buildAllBooksMarkdown,
   buildAnkiCsv,
@@ -189,6 +190,34 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
                     title="导出本书所有标注为 Markdown"
                   >
                     ↓ .md
+                  </button>
+                  {/* C10: 单本 EPUB 导出（走后端 zip 打包，可用 Calibre / Apple Books 打开） */}
+                  <button
+                    onClick={async (e) => {
+                      e.stopPropagation();
+                      if (!isTauriRuntime()) return;
+                      const safeTitle =
+                        hls[0].book_title.replace(/[<>:"/\\|?*]/g, "_") ||
+                        "book";
+                      const picked = await saveDialog({
+                        defaultPath: `${safeTitle}-标注.epub`,
+                        filters: [{ name: "EPUB", extensions: ["epub"] }],
+                      });
+                      if (!picked) return;
+                      try {
+                        await ipc.exportHighlightsEpub(
+                          Number(bookId),
+                          String(picked),
+                        );
+                      } catch (err) {
+                        // eslint-disable-next-line no-alert
+                        alert(`导出 EPUB 失败：${String(err)}`);
+                      }
+                    }}
+                    className="studio-chip text-[10px] px-2 py-0.5"
+                    title="导出本书所有标注为 EPUB"
+                  >
+                    ↓ .epub
                   </button>
                 </div>
               </div>
