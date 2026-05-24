@@ -376,6 +376,8 @@ async function mockInvoke<T>(
     case "export_highlights_epub":
     case "export_highlights_csv":
       return 0 as T;
+    case "fts_search":
+      return [] as T;
     case "read_epub_preview":
     case "read_txt_initial":
     case "read_docx_initial":
@@ -745,6 +747,19 @@ export const ipc = {
     invoke<number>("export_highlights_epub", { bookId, outputPath }),
   exportHighlightsCsv: (bookId: number | null, outputPath: string) =>
     invoke<number>("export_highlights_csv", { bookId, outputPath }),
+  // C1: 全文 FTS5 检索（要求该书已 index）
+  ftsSearch: (query: string, bookId: number | null = null, limit = 50) =>
+    invoke<FtsHit[]>("fts_search", { query, bookId, limit }),
+};
+
+export type FtsHit = {
+  book_id: number;
+  spine_index: number;
+  snippet: string;
+  book_title: string;
+  book_author: string;
+  book_format: string;
+  book_path: string;
 };
 
 export type BookTagRow = { book_id: number; tag: string };

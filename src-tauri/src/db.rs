@@ -118,6 +118,35 @@ CREATE TABLE IF NOT EXISTS chat_messages (
 CREATE INDEX IF NOT EXISTS idx_chat_messages_session
   ON chat_messages(book_id, mode, spine_index, created_at);
 
+-- C1: 全文检索 (FTS5 + trigram 分词) 覆盖 book_chunks.text。
+-- 用 trigram 是因为 SQLite 默认 unicode61 分词对 CJK 无效；trigram 把
+-- 任意 3 字滑窗作 token，中文短查询（>=3 字符）召回稳定，不需要 jieba 等
+-- 外部依赖。代价: 索引体积约 2x text 大小，单机阅读场景接受。
+-- 不用 external content，让 FTS5 自己拷一份文本，省一次 join — text 已经
+-- 是 book_chunks 里相对小头（大头是 embedding blob）。
+CREATE VIRTUAL TABLE IF NOT EXISTS book_chunks_fts USING fts5(
+    text,
+    book_id UNINDEXED,
+    spine_index UNINDEXED,
+    chunk_id UNINDEXED,
+    tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS book_chunks_fts_insert AFTER INSERT ON book_chunks BEGIN
+    INSERT INTO book_chunks_fts(rowid, text, book_id, spine_index, chunk_id)
+    VALUES (new.id, new.text, new.book_id, new.spine_index, new.chunk_index);
+END;
+
+CREATE TRIGGER IF NOT EXISTS book_chunks_fts_delete AFTER DELETE ON book_chunks BEGIN
+    DELETE FROM book_chunks_fts WHERE rowid = old.id;
+END;
+
+CREATE TRIGGER IF NOT EXISTS book_chunks_fts_update AFTER UPDATE ON book_chunks BEGIN
+    DELETE FROM book_chunks_fts WHERE rowid = old.id;
+    INSERT INTO book_chunks_fts(rowid, text, book_id, spine_index, chunk_id)
+    VALUES (new.id, new.text, new.book_id, new.spine_index, new.chunk_index);
+END;
+
 -- 读书日历：按 (book, 本地日期) 聚合阅读时长。day_key = YYYYMMDD（本地时区）。
 -- 由前端在调 add_read_time 时算好 day_key 传过来——服务端不知道用户时区，
 -- 由前端单一来源决定（CLAUDE.md 原则 17 协调信号集中）。
@@ -196,6 +225,15 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         "UPDATE book_chunks
          SET embedding_model = 'BAAI/bge-small-zh-v1.5'
          WHERE embedding_model IS NULL",
+        [],
+    );
+    // C1: FTS5 回填——把已存在但 FTS 表里没有的 chunks 灌进去。幂等：
+    // 触发器同步新增/删除/更新，回填只补历史。
+    let _ = conn.execute(
+        "INSERT INTO book_chunks_fts(rowid, text, book_id, spine_index, chunk_id)
+         SELECT id, text, book_id, spine_index, chunk_index
+         FROM book_chunks
+         WHERE id NOT IN (SELECT rowid FROM book_chunks_fts)",
         [],
     );
     Ok(())
@@ -1420,9 +1458,148 @@ pub fn list_chunks(conn: &Connection, book_id: Option<i64>) -> rusqlite::Result<
     Ok(rows)
 }
 
+// ---------- C1: 全文检索 (FTS5 trigram) ----------
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FtsHit {
+    pub book_id: i64,
+    pub spine_index: i64,
+    pub snippet: String,
+    pub book_title: String,
+    pub book_author: String,
+    pub book_format: String,
+    pub book_path: String,
+}
+
+/// 把用户输入的自由文本转成 FTS5 MATCH 能吃的 query string。
+///
+/// - 双引号包起来 → 当短语查（避免被 FTS5 当成多 token AND）
+/// - 引号本身转义成两个双引号（FTS5 字符串字面量规则）
+/// - 控制字符 / 反斜杠剥掉，避免引爆 parser
+pub fn build_fts_match(raw: &str) -> String {
+    let cleaned: String = raw
+        .chars()
+        .filter(|c| !c.is_control() && *c != '\\')
+        .collect();
+    let escaped = cleaned.replace('"', "\"\"");
+    format!("\"{}\"", escaped.trim())
+}
+
+/// 全库 / 单本全文检索。`book_id=Some(_)` 只搜该书；None 搜全库。
+/// 返回 top-`limit` 命中，按 FTS5 内置 bm25() 排序（rank 越小越靠前）。
+/// snippet 是 FTS5 highlight 函数包了 «...» 的命中上下文。
+pub fn search_fts(
+    conn: &Connection,
+    raw_query: &str,
+    book_id: Option<i64>,
+    limit: i64,
+) -> rusqlite::Result<Vec<FtsHit>> {
+    let match_expr = build_fts_match(raw_query);
+    if match_expr.trim_matches('"').is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = if book_id.is_some() {
+        "SELECT f.book_id, f.spine_index,
+                snippet(book_chunks_fts, 0, '«', '»', '…', 24) AS snip,
+                b.title, b.author, b.format, b.file_path
+         FROM book_chunks_fts f
+         JOIN books b ON b.id = f.book_id
+         WHERE f.text MATCH ?1 AND f.book_id = ?2
+         ORDER BY bm25(book_chunks_fts)
+         LIMIT ?3"
+    } else {
+        "SELECT f.book_id, f.spine_index,
+                snippet(book_chunks_fts, 0, '«', '»', '…', 24) AS snip,
+                b.title, b.author, b.format, b.file_path
+         FROM book_chunks_fts f
+         JOIN books b ON b.id = f.book_id
+         WHERE f.text MATCH ?1
+         ORDER BY bm25(book_chunks_fts)
+         LIMIT ?2"
+    };
+
+    let mapper = |row: &rusqlite::Row| {
+        Ok(FtsHit {
+            book_id: row.get(0)?,
+            spine_index: row.get(1)?,
+            snippet: row.get(2)?,
+            book_title: row.get(3)?,
+            book_author: row.get(4)?,
+            book_format: row.get(5)?,
+            book_path: row.get(6)?,
+        })
+    };
+
+    let mut stmt = conn.prepare(sql)?;
+    let rows = if let Some(bid) = book_id {
+        stmt.query_map(params![match_expr, bid, limit], mapper)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    } else {
+        stmt.query_map(params![match_expr, limit], mapper)?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+    };
+    Ok(rows)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---------- C1: FTS5 ----------
+
+    #[test]
+    fn build_fts_match_escapes_quotes_and_wraps() {
+        assert_eq!(build_fts_match("人间词话"), r#""人间词话""#);
+        // 用户输入双引号 → 转成两个引号 (FTS5 字符串字面量规则)
+        assert_eq!(build_fts_match(r#"a"b"#), r#""a""b""#);
+        // 控制字符被剥掉
+        assert_eq!(build_fts_match("a\tb\nc"), r#""abc""#);
+        // 反斜杠剥掉
+        assert_eq!(build_fts_match(r"\path\\"), r#""path""#);
+    }
+
+    /// 端到端冒烟：建表→插数据→查→确认 trigram 中文检索能跑通。
+    /// 这个测试同时验证 SQLite bundled 版本支持 FTS5 trigram 分词器。
+    #[test]
+    fn fts5_trigram_matches_chinese() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "PRAGMA foreign_keys=ON;
+             CREATE TABLE books (id INTEGER PRIMARY KEY, file_path TEXT NOT NULL,
+                                  format TEXT NOT NULL DEFAULT '',
+                                  title TEXT NOT NULL DEFAULT '',
+                                  author TEXT NOT NULL DEFAULT '');
+             CREATE TABLE book_chunks (id INTEGER PRIMARY KEY,
+                                        book_id INTEGER NOT NULL,
+                                        spine_index INTEGER NOT NULL,
+                                        chunk_index INTEGER NOT NULL,
+                                        text TEXT NOT NULL);
+             CREATE VIRTUAL TABLE book_chunks_fts USING fts5(
+                 text, book_id UNINDEXED, spine_index UNINDEXED, chunk_id UNINDEXED,
+                 tokenize='trigram'
+             );
+             INSERT INTO books(id, file_path, title, author) VALUES (1, 'p', '词话', '王国维');
+             INSERT INTO book_chunks(id, book_id, spine_index, chunk_index, text)
+                VALUES (1, 1, 0, 0, '人间词话讲究境界');
+             INSERT INTO book_chunks_fts(rowid, text, book_id, spine_index, chunk_id)
+                VALUES (1, '人间词话讲究境界', 1, 0, 0);",
+        )
+        .unwrap();
+
+        let hits = search_fts(&conn, "人间词话", None, 10).unwrap();
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].book_id, 1);
+        // snippet 应该包含我们的命中标记
+        assert!(hits[0].snippet.contains('«') || hits[0].snippet.contains('»'));
+
+        // 无关查询应返空
+        let none = search_fts(&conn, "外星人", None, 10).unwrap();
+        assert!(none.is_empty());
+
+        // 空查询应返空（防 FTS5 parse error）
+        let empty = search_fts(&conn, "   ", None, 10).unwrap();
+        assert!(empty.is_empty());
+    }
 
     #[test]
     fn normalize_tags_dedup_and_whitelist() {

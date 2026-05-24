@@ -149,6 +149,7 @@ pub fn run() {
             commands::import_calibre_library,
             commands::export_highlights_epub,
             commands::export_highlights_csv,
+            commands::fts_search,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

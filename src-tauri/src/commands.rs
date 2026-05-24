@@ -478,6 +478,31 @@ pub struct DayReading {
     pub bookmarks: Vec<db::BookmarkWithBook>,
 }
 
+// ---------- C1: 全库 / 单本 全文检索 ----------
+
+#[tauri::command]
+#[tracing::instrument(skip(state))]
+pub fn fts_search(
+    query: String,
+    book_id: Option<i64>,
+    limit: Option<i64>,
+    state: State<AppState>,
+) -> Result<Vec<db::FtsHit>, String> {
+    if query.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let cap = limit.unwrap_or(50).clamp(1, 500);
+    let started = std::time::Instant::now();
+    let hits = db::search_fts(&conn, &query, book_id, cap).map_err(|e| e.to_string())?;
+    tracing::info!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        hits = hits.len(),
+        "fts_search complete"
+    );
+    Ok(hits)
+}
+
 // ---------- C10: 导出高亮 EPUB / CSV ----------
 
 #[tauri::command]

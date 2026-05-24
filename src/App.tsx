@@ -16,6 +16,7 @@ import {
 import { GlobalAiSettingsPanel } from "@/features/settings/GlobalAiSettingsPanel";
 import { CommandPalette } from "@/features/command-palette/CommandPalette";
 import { useCommandPalette } from "@/features/command-palette/useCommandPalette";
+import { FullTextSearch } from "@/features/search/FullTextSearch";
 import type { AiSettings, Book } from "@/lib/ipc";
 
 type View =
@@ -48,6 +49,8 @@ function AppShell() {
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
   // C6: 全局命令面板 (Ctrl/Cmd+K)
   const { open: paletteOpen, setOpen: setPaletteOpen } = useCommandPalette();
+  // C1: 全文 FTS 检索面板（命令面板 / library 按钮 都能触发）
+  const [searchOpen, setSearchOpen] = useState(false);
 
   useEffect(() => {
     loadAiSettings()
@@ -81,6 +84,17 @@ function AppShell() {
     <CommandPalette
       open={paletteOpen}
       onClose={() => setPaletteOpen(false)}
+      extraActions={[
+        {
+          id: "global-fts-search",
+          label: "全文搜索本库",
+          hint: "C1 · 在已索引的书里全文搜",
+          group: "其他",
+          run: () => {
+            setSearchOpen(true);
+          },
+        },
+      ]}
       navigate={{
         library: () => setView({ kind: "library" }),
         notes: () => setView({ kind: "notes" }),
@@ -94,6 +108,22 @@ function AppShell() {
           book,
           initialSpine: spineIndex,
           initialScrollY: scrollY,
+          returnTo: "library",
+        })
+      }
+    />
+  );
+
+  const globalFullTextSearch = (
+    <FullTextSearch
+      open={searchOpen}
+      onClose={() => setSearchOpen(false)}
+      scope={{ kind: "library" }}
+      onOpenHit={(book, spineIndex) =>
+        setView({
+          kind: "reader",
+          book,
+          initialSpine: spineIndex,
           returnTo: "library",
         })
       }
@@ -125,6 +155,7 @@ function AppShell() {
           />
           {globalSettingsPanel}
           {globalCommandPalette}
+          {globalFullTextSearch}
         </>
       );
     }
@@ -163,6 +194,7 @@ function AppShell() {
           }
         />
         {globalCommandPalette}
+        {globalFullTextSearch}
       </>
     );
   }
@@ -172,6 +204,7 @@ function AppShell() {
       <>
         <MusicView onBack={() => setView({ kind: "library" })} />
         {globalCommandPalette}
+        {globalFullTextSearch}
       </>
     );
   }
@@ -190,6 +223,7 @@ function AppShell() {
           }
         />
         {globalCommandPalette}
+        {globalFullTextSearch}
       </>
     );
   }
@@ -212,6 +246,8 @@ function AppShell() {
         onOpenAiSettings={() => setAiSettingsOpen(true)}
       />
       {globalSettingsPanel}
+      {globalCommandPalette}
+      {globalFullTextSearch}
     </>
   );
 }
