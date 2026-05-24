@@ -14,6 +14,8 @@ import {
   saveAiSettings,
 } from "@/lib/ipc";
 import { GlobalAiSettingsPanel } from "@/features/settings/GlobalAiSettingsPanel";
+import { CommandPalette } from "@/features/command-palette/CommandPalette";
+import { useCommandPalette } from "@/features/command-palette/useCommandPalette";
 import type { AiSettings, Book } from "@/lib/ipc";
 
 type View =
@@ -44,6 +46,8 @@ function AppShell() {
   const [aiSettings, setAiSettings] = useState<AiSettings>(DEFAULT_AI_SETTINGS);
   const [aiSettingsLoaded, setAiSettingsLoaded] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  // C6: 全局命令面板 (Ctrl/Cmd+K)
+  const { open: paletteOpen, setOpen: setPaletteOpen } = useCommandPalette();
 
   useEffect(() => {
     loadAiSettings()
@@ -72,6 +76,30 @@ function AppShell() {
     />
   ) : null;
 
+  // C6: 命令面板可达的导航 + 打开书 — 由 App 注入，CommandPalette 不直接 setView
+  const globalCommandPalette = (
+    <CommandPalette
+      open={paletteOpen}
+      onClose={() => setPaletteOpen(false)}
+      navigate={{
+        library: () => setView({ kind: "library" }),
+        notes: () => setView({ kind: "notes" }),
+        music: () => setView({ kind: "music" }),
+        stats: () => setView({ kind: "stats" }),
+        openAiSettings: () => setAiSettingsOpen(true),
+      }}
+      openBook={(book, spineIndex, scrollY) =>
+        setView({
+          kind: "reader",
+          book,
+          initialSpine: spineIndex,
+          initialScrollY: scrollY,
+          returnTo: "library",
+        })
+      }
+    />
+  );
+
   if (view.kind === "reader") {
     const backLabel =
       view.returnTo === "notes"
@@ -96,6 +124,7 @@ function AppShell() {
             onBack={onBack}
           />
           {globalSettingsPanel}
+          {globalCommandPalette}
         </>
       );
     }
@@ -120,37 +149,48 @@ function AppShell() {
 
   if (view.kind === "notes") {
     return (
-      <NotesView
-        onBack={() => setView({ kind: "library" })}
-        onOpenBookAtHighlight={(book, spineIdx, hlId) =>
-          setView({
-            kind: "reader",
-            book,
-            initialSpine: spineIdx,
-            initialHighlight: hlId,
-            returnTo: "notes",
-          })
-        }
-      />
+      <>
+        <NotesView
+          onBack={() => setView({ kind: "library" })}
+          onOpenBookAtHighlight={(book, spineIdx, hlId) =>
+            setView({
+              kind: "reader",
+              book,
+              initialSpine: spineIdx,
+              initialHighlight: hlId,
+              returnTo: "notes",
+            })
+          }
+        />
+        {globalCommandPalette}
+      </>
     );
   }
 
   if (view.kind === "music") {
-    return <MusicView onBack={() => setView({ kind: "library" })} />;
+    return (
+      <>
+        <MusicView onBack={() => setView({ kind: "library" })} />
+        {globalCommandPalette}
+      </>
+    );
   }
 
   if (view.kind === "stats") {
     return (
-      <StatsView
-        onBack={() => setView({ kind: "library" })}
-        onOpenBook={(book) =>
-          setView({
-            kind: "reader",
-            book,
-            returnTo: "stats",
-          })
-        }
-      />
+      <>
+        <StatsView
+          onBack={() => setView({ kind: "library" })}
+          onOpenBook={(book) =>
+            setView({
+              kind: "reader",
+              book,
+              returnTo: "stats",
+            })
+          }
+        />
+        {globalCommandPalette}
+      </>
     );
   }
 
