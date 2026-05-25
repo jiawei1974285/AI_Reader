@@ -104,10 +104,18 @@ export function EpubView({
     bookmarksLoading,
     refresh: refreshBookmarks,
   } = useBookmarksPanel(bookId);
+  // 改进 2: flipDir 设上后自动 350ms 后清空 (略大于 CSS animation 320ms)
   // B2: entities 5 个 state + click effect + fetch fn 都搬到 useChapterEntities，
   //     但 hook 需要 currentChapter/currentChapterLabel/aiConfigured，这些在下方
   //     才计算——所以 hook 的实例化移到 line ~165 处（chapter 解出来之后）。
   const [bookmarkStatus, setBookmarkStatus] = useState<string | null>(null);
+  // 改进 2: 翻页 3D 动画方向. 设上后 ~360ms 自动清零, 期间 article 加 class
+  const [flipDir, setFlipDir] = useState<"forward" | "backward" | null>(null);
+  useEffect(() => {
+    if (!flipDir) return;
+    const t = window.setTimeout(() => setFlipDir(null), 360);
+    return () => window.clearTimeout(t);
+  }, [flipDir]);
 
   // B2: 进度（初始 load / 恢复 / 滚动 throttle 保存）三件事抽到一个 hook。
   // A4 引入的 paragraph_index/char_offset 在 hook 内部统一管。
@@ -510,6 +518,7 @@ export function EpubView({
   const goToPrevPage = useCallback(async () => {
     const root = scrollRef.current;
     if (!root || loadingPrev) return;
+    setFlipDir("backward"); // 改进 2: 触发翻页动画
     const pageStep = getPagedStep(root);
     if (root.scrollLeft > 8) {
       const left = Math.max(0, root.scrollLeft - pageStep);
@@ -547,6 +556,7 @@ export function EpubView({
   const goToNextPage = useCallback(async () => {
     const root = scrollRef.current;
     if (!root || loadingMore) return;
+    setFlipDir("forward"); // 改进 2: 触发翻页动画
     const maxLeft = Math.max(0, root.scrollWidth - root.clientWidth);
     const pageStep = getPagedStep(root);
     if (root.scrollLeft < maxLeft - 8) {
@@ -1077,7 +1087,13 @@ export function EpubView({
           <article
             className={`reading mx-auto px-10 md:px-16 py-16 ${
               settings.paragraph_indent ? "" : "indent-none"
-            } ${isPagedMode ? "reading-paged" : ""}`}
+            } ${isPagedMode ? "reading-paged" : ""} ${
+              flipDir === "forward"
+                ? "reading-flipping-forward"
+                : flipDir === "backward"
+                  ? "reading-flipping-backward"
+                  : ""
+            }`}
             style={readingStyle}
           >
             {chapters.map((ch, i) => (

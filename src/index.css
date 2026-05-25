@@ -367,7 +367,35 @@ body {
     overflow-y: hidden;
     scroll-snap-type: x mandatory;
     scroll-behavior: smooth;
+    /* 改进 2: 书本翻页 — 给 child article 提供 3D 透视基线 */
+    perspective: 1800px;
+    perspective-origin: center center;
   }
+}
+
+/* 改进 2: 翻页 3D 动画.
+ * 触发由 EpubView setFlipDir("forward"|"backward") 在 article 上加 class,
+ * 320ms 后 setFlipDir(null) 清掉. 视觉上像书页轻微翻转一下又回来,
+ * 比直接 jump 有翻动的反馈; 不依赖第三方库 (按 CLAUDE.md 原则 14). */
+@keyframes reading-flip-forward {
+  0%   { transform: rotateY(0deg);    opacity: 1; }
+  45%  { transform: rotateY(-14deg);  opacity: 0.55; }
+  100% { transform: rotateY(0deg);    opacity: 1; }
+}
+@keyframes reading-flip-backward {
+  0%   { transform: rotateY(0deg);   opacity: 1; }
+  45%  { transform: rotateY(14deg);  opacity: 0.55; }
+  100% { transform: rotateY(0deg);   opacity: 1; }
+}
+.reading-flipping-forward {
+  animation: reading-flip-forward 320ms ease-in-out;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
+}
+.reading-flipping-backward {
+  animation: reading-flip-backward 320ms ease-in-out;
+  transform-style: preserve-3d;
+  backface-visibility: hidden;
 }
 
 /* EPUB / MOBI readers now inline images as base64 data: URIs (Phase 1 has
