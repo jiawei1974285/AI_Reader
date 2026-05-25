@@ -11,6 +11,10 @@ type Props = {
   onSelect: (entity: EntityWithKey) => void;
   onOpenSettings: () => void;
   onClose: () => void;
+  /** 改进 1: 一键导出整本书已抽过的所有章节实体为 MD */
+  onExportAll?: () => void;
+  /** 已抽过的章节数 (=entitiesBySpine 的 key 数), 用于决定导出按钮是否可用 */
+  totalExtractedChapters?: number;
 };
 
 export function ChapterEntitiesPanel({
@@ -24,6 +28,8 @@ export function ChapterEntitiesPanel({
   onSelect,
   onOpenSettings,
   onClose,
+  onExportAll,
+  totalExtractedChapters = 0,
 }: Props) {
   const people = entities.filter((e) => e.kind === "person");
   const places = entities.filter((e) => e.kind !== "person");
@@ -65,6 +71,15 @@ export function ChapterEntitiesPanel({
         )}
         {error && (
           <p className="text-xs text-red-600 mt-3 leading-relaxed">{error}</p>
+        )}
+        {onExportAll && totalExtractedChapters > 0 && (
+          <button
+            onClick={onExportAll}
+            className="studio-button w-full mt-2 text-xs"
+            title={`已抽取 ${totalExtractedChapters} 个章节的实体, 导出为 Markdown`}
+          >
+            ↓ 导出全书实体 .md ({totalExtractedChapters} 章)
+          </button>
         )}
       </div>
 

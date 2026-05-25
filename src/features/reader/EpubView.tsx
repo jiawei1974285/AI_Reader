@@ -761,6 +761,69 @@ export function EpubView({
 
   // B2: extractCurrentEntities 抽到 useChapterEntities.fetchEntitiesForCurrentChapter
 
+  // 改进 1: 把整本书已抽取的实体按章组装成 MD 下载. 每章一个 ##, 人物/地点分组.
+  // 只导出已经在 entitiesBySpine 里有的章节 (用户主动跑过"提取本章"的那些).
+  function exportEntitiesMarkdown() {
+    const spineKeys = Object.keys(entitiesBySpine)
+      .map((k) => Number(k))
+      .filter((k) => Number.isFinite(k) && (entitiesBySpine[k]?.length ?? 0) > 0)
+      .sort((a, b) => a - b);
+    if (spineKeys.length === 0) return;
+    const bookTitle =
+      chapters[0]?.title ?? toc.find((t) => t.spine_index === 0)?.label ?? "未知书";
+    const bookAuthor = chapters[0]?.author ?? "";
+    const lines: string[] = [];
+    lines.push(`# 《${bookTitle}》全书实体`);
+    if (bookAuthor && bookAuthor !== "Unknown") {
+      lines.push(`> ${bookAuthor}`);
+    }
+    lines.push(
+      `> 共 ${spineKeys.length} 个章节, ${spineKeys.reduce(
+        (acc, k) => acc + (entitiesBySpine[k]?.length ?? 0),
+        0,
+      )} 个实体 · 导出于 ${new Date().toLocaleString("zh-CN")}`,
+    );
+    lines.push("");
+    for (const spine of spineKeys) {
+      const list = entitiesBySpine[spine] ?? [];
+      if (list.length === 0) continue;
+      const label =
+        toc.find((t) => t.spine_index === spine)?.label ?? `第 ${spine + 1} 章`;
+      lines.push(`## ${label}`);
+      lines.push("");
+      const people = list.filter((e) => e.kind === "person");
+      const places = list.filter((e) => e.kind !== "person");
+      if (people.length > 0) {
+        lines.push(`### 人物 · ${people.length}`);
+        lines.push("");
+        for (const e of people) {
+          lines.push(`- **${e.name}** — ${e.summary}`);
+        }
+        lines.push("");
+      }
+      if (places.length > 0) {
+        lines.push(`### 地点 · ${places.length}`);
+        lines.push("");
+        for (const e of places) {
+          lines.push(`- **${e.name}** — ${e.summary}`);
+        }
+        lines.push("");
+      }
+    }
+    const safeTitle = bookTitle.replace(/[<>:"/\\|?*]/g, "_");
+    const blob = new Blob([lines.join("\n")], {
+      type: "text/markdown;charset=utf-8",
+    });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `${safeTitle}-实体.md`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
   async function addBookmark() {
     if (!currentChapter) return;
     const scrollY = isPagedMode
@@ -1053,13 +1116,31 @@ export function EpubView({
             onSelect={selectEntity}
             onOpenSettings={onOpenAiSettings}
             onClose={() => setEntitiesOpen(false)}
+            onExportAll={exportEntitiesMarkdown}
+            totalExtractedChapters={
+              Object.values(entitiesBySpine).filter((arr) => arr && arr.length > 0).length
+            }
           />
         )}
       </div>
 
-      {/* Chapter progress strip pinned to the bottom of the reader. */}
+      {/* Chapter progress strip + 翻页按钮 (分页模式) — 改进 3 把翻页放到正文下方,
+          手指/鼠标不用跨屏到 header */}
       {total > 0 && (
         <div className="flex-shrink-0 px-6 py-1.5 border-t border-[var(--color-paper-edge)] bg-[var(--color-paper-soft)]/60 flex items-center gap-3">
+          {isPagedMode && (
+            <button
+              onClick={goToPrevPage}
+              disabled={
+                loadingPrev ||
+                (activeIdx <= 0 && pageOffset <= 8)
+              }
+              className="studio-button px-3 py-0.5 text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+              title="上一页"
+            >
+              ← 上一页
+            </button>
+          )}
           <span className="text-[10px] studio-subtle tracking-[0.1em] tabular-nums">
             第 {activeIdx + 1} 章 / 共 {total} 章
           </span>
@@ -1074,6 +1155,19 @@ export function EpubView({
           <span className="text-[10px] studio-subtle tabular-nums w-10 text-right">
             {Math.round(((activeIdx + 1) / total) * 100)}%
           </span>
+          {isPagedMode && (
+            <button
+              onClick={goToNextPage}
+              disabled={
+                loadingMore ||
+                (activeIdx >= total - 1 && pageOffset >= pageMaxOffset - 8)
+              }
+              className="studio-button px-3 py-0.5 text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+              title="下一页"
+            >
+              下一页 →
+            </button>
+          )}
         </div>
       )}
 
