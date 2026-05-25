@@ -370,6 +370,11 @@ body {
     /* 改进 2: 书本翻页 — 给 child article 提供 3D 透视基线 */
     perspective: 1800px;
     perspective-origin: center center;
+    /* fix: 分页两侧留白由 container padding 提供, 而非 article padding.
+     * 等于 .reading-paged 的 column-gap 的一半 (2rem * 2 = 4rem = column-gap),
+     * 使 column-width + column-gap 严格 = container.clientWidth, scroll-snap 精确对齐.
+     * (CLAUDE.md 原则 6 内/外模型一致: 用一组等式约束 snap step 严格 = 翻页距离.) */
+    padding-inline: 2rem;
   }
 }
 

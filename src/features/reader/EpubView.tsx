@@ -1085,15 +1085,16 @@ export function EpubView({
           }`}
         >
           <article
-            className={`reading mx-auto px-10 md:px-16 py-16 ${
-              settings.paragraph_indent ? "" : "indent-none"
-            } ${isPagedMode ? "reading-paged" : ""} ${
-              flipDir === "forward"
-                ? "reading-flipping-forward"
-                : flipDir === "backward"
-                  ? "reading-flipping-backward"
-                  : ""
-            }`}
+            className={[
+              "reading mx-auto py-16",
+              // fix: 分页模式 article 不能有横向 padding (列宽必须严格 = container 内容区)
+              isPagedMode ? "reading-paged" : "px-10 md:px-16",
+              settings.paragraph_indent ? "" : "indent-none",
+              flipDir === "forward" ? "reading-flipping-forward" : "",
+              flipDir === "backward" ? "reading-flipping-backward" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
             style={readingStyle}
           >
             {chapters.map((ch, i) => (
@@ -1375,9 +1376,11 @@ function cssEscape(value: string): string {
 }
 
 function getPagedStep(root: HTMLElement): number {
-  const article = root.querySelector(".reading-paged");
-  const gap = article ? Number.parseFloat(getComputedStyle(article).columnGap) : 0;
-  return Math.max(320, root.clientWidth + (Number.isFinite(gap) ? gap : 0));
+  // fix: 翻一页距离 = container 可见宽 (含 container padding) = scroll-snap 步进.
+  // 配合 CSS 里 column-gap = 2 × container padding-inline 的约束,
+  // (article 实际 column-width + column-gap) 严格 = root.clientWidth.
+  // 之前 + gap 是错的, 累加之后每页偏 ~16-64px, 多页后两边出现"切一半的列".
+  return Math.max(320, root.clientWidth);
 }
 
 const ChapterBlock = memo(function ChapterBlock({
