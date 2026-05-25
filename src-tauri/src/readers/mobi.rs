@@ -472,9 +472,31 @@ fn decoded_body_is_garbage(s: &str) -> bool {
         .chars()
         .filter(|c| c.is_control() && !matches!(*c, '\n' | '\r' | '\t'))
         .count();
-    let common_cjk = sample
+    // 问题 1: 之前 common_cjk 只到 0x82FF, 把"非中文"的日语扩展汉字 + 假名
+    // (hiragana/katakana) + 韩文 (Hangul) 全判成"不可读", 导致日本作者
+    // (例: 盐野七生《文艺复兴的故事 01》)、日韩 MOBI/AZW 被错判 garbage 报错.
+    //
+    // 修: 把 CJK Unified Ideographs 范围扩到 0x9FFF (覆盖几乎所有常用日韩中汉字),
+    // 加 hiragana / katakana / Hangul 三段 readable 字符.
+    // (CLAUDE.md 原则 6 内/外模型一致: 阅读器不是中文专用, 不该只认中文.)
+    let cjk_ideographs = sample
         .chars()
-        .filter(|c| ('\u{4E00}'..='\u{82FF}').contains(c))
+        .filter(|c| ('\u{4E00}'..='\u{9FFF}').contains(c))
+        .count();
+    let kana_hangul = sample
+        .chars()
+        .filter(|c| {
+            // Hiragana
+            ('\u{3040}'..='\u{309F}').contains(c)
+            // Katakana
+            || ('\u{30A0}'..='\u{30FF}').contains(c)
+            // CJK Symbols and Punctuation (《》 「」 〇 等)
+            || ('\u{3000}'..='\u{303F}').contains(c)
+            // Hangul Syllables (韩文)
+            || ('\u{AC00}'..='\u{D7AF}').contains(c)
+            // Halfwidth / Fullwidth Forms (常见标点)
+            || ('\u{FF00}'..='\u{FFEF}').contains(c)
+        })
         .count();
     let ascii = sample.chars().filter(|c| c.is_ascii()).count();
     let has_markup = sample.contains("<html")
@@ -485,7 +507,8 @@ fn decoded_body_is_garbage(s: &str) -> bool {
     let total_f = total as f64;
     let bad_ratio = bad as f64 / total_f;
     let control_ratio = controls as f64 / total_f;
-    let readable_ratio = (common_cjk + ascii) as f64 / total_f;
+    let readable_ratio =
+        (cjk_ideographs + kana_hangul + ascii) as f64 / total_f;
 
     bad_ratio > 0.02 || control_ratio > 0.02 || (!has_markup && readable_ratio < 0.45)
 }
@@ -750,5 +773,41 @@ mod tests {
 
         assert_eq!(sanitize_sparse_decode_markers(&text), text);
         assert!(decoded_body_is_garbage(&text));
+    }
+
+    /// 问题 1 回归: 之前 common_cjk 只到 0x82FF, 日语 hiragana / katakana
+    /// 被算成"不可读", 整本日语书会被错判 garbage.
+    /// 这里用一段全 hiragana + katakana + 常用 CJK + 标点的日语样本验证.
+    #[test]
+    fn japanese_book_not_flagged_as_garbage() {
+        // 来自盐野七生《文艺复兴的故事》典型句式: 汉字 + 假名 + 标点混合
+        let sample = "ルネサンスとは何か。それは、人間の発見と、世界の発見\
+                      である。一四世紀のイタリアから始まったこの大きな精神\
+                      運動は、ヨーロッパ全域に広がり、近代という新しい時代\
+                      の幕を開けた。フィレンツェ、ローマ、ヴェネツィア——\
+                      かつての都市国家たちが、競い合いながら芸術と思想を\
+                      磨き上げていった。レオナルド、ミケランジェロ、ラファ\
+                      エロといった巨匠たちの作品は、いまもなお我々を魅了\
+                      してやまない。"
+            .repeat(20); // 让样本足够长以触发 garbage 检测路径
+        assert!(
+            !decoded_body_is_garbage(&sample),
+            "日语典型样本被误判 garbage"
+        );
+    }
+
+    #[test]
+    fn korean_book_not_flagged_as_garbage() {
+        // Hangul + 少量汉字 + ASCII 标点
+        let sample = "한국 문학의 깊이는 그 역사만큼이나 풍부하다. \
+                      서울에서 시작된 근현대 문학은 식민지 시대와 분단의 \
+                      아픔을 거치며 독자적인 색채를 띠게 되었다. 김소월, \
+                      박경리, 최인훈 등의 작가들은 한국어의 가능성을 \
+                      한계까지 밀어붙였다."
+            .repeat(20);
+        assert!(
+            !decoded_body_is_garbage(&sample),
+            "韩语典型样本被误判 garbage"
+        );
     }
 }
