@@ -228,12 +228,59 @@ function wrapRange(range: Range, hl: Highlight) {
   mark.dataset.hlId = String(hl.id);
   try {
     range.surroundContents(mark);
+    return;
   } catch {
-    // Range crosses element boundaries (e.g. spans two paragraphs).
-    // Fall back to extract + insert.
-    const fragment = range.extractContents();
-    mark.appendChild(fragment);
-    range.insertNode(mark);
+    // 跨多个元素 (例如选区跨两个段落): surroundContents 抛 InvalidStateError.
+    //
+    // 问题 2 之前 fallback 是 extractContents + 单个 mark 包整个 fragment,
+    // 结果一个 mark 里同时含两段文字 + 它们之间的段落分隔 (br / p 边界),
+    // 渲染出来段落间出现一根竖线、看不到明显高亮.
+    //
+    // 改为「分段 wrap」: 走 range 跨过的每一个 text node, 每段单独包一个 mark,
+    // 段落边界不被破坏, 视觉上每段都正常涂色.
+    wrapRangePiecewise(range, hl);
+  }
+}
+
+/**
+ * 把 range 跨过的所有 text node 各包一个 `<mark.ai-hl>`. 段落边界保留.
+ * 多个 mark 共享同一个 hl.id (前端 mark click 反查仍按 id 找到一组).
+ */
+function wrapRangePiecewise(range: Range, hl: Highlight) {
+  const root: Node = range.commonAncestorContainer;
+  // common ancestor 可能是 text node (range 在单个 text 节点内) — 这种情况
+  // 早就被 surroundContents 处理了, 进 fallback 必然不是 text node.
+  const walkRoot =
+    root.nodeType === Node.TEXT_NODE
+      ? (root.parentNode as Node | null) ?? root
+      : root;
+  const walker = document.createTreeWalker(walkRoot, NodeFilter.SHOW_TEXT);
+  const toWrap: Array<{ node: Text; start: number; end: number }> = [];
+  let n: Node | null;
+  while ((n = walker.nextNode())) {
+    if (!range.intersectsNode(n)) continue;
+    const t = n as Text;
+    let start = 0;
+    let end = t.length;
+    if (t === range.startContainer) start = range.startOffset;
+    if (t === range.endContainer) end = range.endOffset;
+    if (start < end) toWrap.push({ node: t, start, end });
+  }
+  // 倒序 wrap: surroundContents 会 split text node, 影响后面节点的 offset.
+  // 倒序处理同一节点内多片段时安全; 跨节点则各自独立, 顺序无关.
+  for (let i = toWrap.length - 1; i >= 0; i--) {
+    const { node, start, end } = toWrap[i];
+    const r = document.createRange();
+    try {
+      r.setStart(node, start);
+      r.setEnd(node, end);
+      const m = document.createElement("mark");
+      m.className = `ai-hl ai-hl-${hl.color}`;
+      m.dataset.hlId = String(hl.id);
+      r.surroundContents(m);
+    } catch {
+      // 单段内 surroundContents 仍报错 (空白节点 / 极端情况) — 跳过该段, 不致命
+    }
   }
 }
 
