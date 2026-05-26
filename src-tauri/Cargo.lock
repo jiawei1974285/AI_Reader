@@ -55,10 +55,13 @@ dependencies = [
 name = "aireader"
 version = "0.2.1"
 dependencies = [
+ "aes",
  "ammonia",
  "base64 0.22.1",
  "chardetng",
+ "cipher",
  "docx-rs",
+ "ecb",
  "encoding_rs",
  "epub",
  "fastembed",
@@ -3284,9 +3287,9 @@ dependencies = [
 
 [[package]]
 name = "ncmdump"
-version = "0.7.3"
+version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "401a31629d7bb228b40364655b605761902bb35a06babb514d1b48e9e277dded"
+checksum = "7d0b7a17f7313c18140e04ef4d85b238ee93fa3714551eb9ae53cf08a39b59e1"
 dependencies = [
  "aes",
  "base64 0.21.7",

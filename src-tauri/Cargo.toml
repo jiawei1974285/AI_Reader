@@ -1,6 +1,6 @@
 [package]
 name = "aireader"
-version = "0.2.1"
+version = "0.2.2"
 description = "A Tauri App"
 authors = ["you"]
 edition = "2021"
@@ -38,7 +38,12 @@ docx-rs = "0.4"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 fastembed = "4"
-ncmdump = "0.7"
+# 自己实现 NCM 解密 (ncmdump 0.7/0.8 实测对部分网易云文件 get_data() 返加密字节,
+# 算法公开 ~150 行可控. 仍保留 ncmdump 作为后备 (例如解析 metadata).
+ncmdump = "0.8"
+aes = "0.8"
+ecb = "0.1"
+cipher = "0.4"
 futures-util = "0.3"
 mobi = "0.8"
 notify = "8"
