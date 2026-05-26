@@ -258,12 +258,31 @@ export function MusicPlayerProvider({ children }: { children: React.ReactNode })
         onLoadedMetadata={(e) =>
           setDuration(e.currentTarget.duration || 0)
         }
-        onError={() => {
-          setError(
-            currentTrack
-              ? `无法播放：${currentTrack.filename}`
-              : "Audio error",
-          );
+        onError={(e) => {
+          // 解析 HTMLMediaElement.error 拿具体原因——用户报"不能播放"时
+          // 之前只能看到一行 "无法播放：xxx.ncm", 排查不动。
+          const me = (e.currentTarget as HTMLAudioElement).error;
+          const codeLabel: Record<number, string> = {
+            1: "MEDIA_ERR_ABORTED 用户中止",
+            2: "MEDIA_ERR_NETWORK 网络错误",
+            3: "MEDIA_ERR_DECODE 解码失败 (文件损坏或格式不被支持)",
+            4: "MEDIA_ERR_SRC_NOT_SUPPORTED 文件类型或路径不可加载",
+          };
+          const reason = me
+            ? `${codeLabel[me.code] ?? `code=${me.code}`}${me.message ? ` · ${me.message}` : ""}`
+            : "未知错误";
+          const file = currentTrack?.filename ?? "(unknown)";
+          const srcInfo = currentSrc ? ` · src=${currentSrc.slice(0, 80)}` : "";
+          // 控制台打印完整 src 方便用 devtools 复制
+          // eslint-disable-next-line no-console
+          console.error("[music] audio error", {
+            file,
+            code: me?.code,
+            message: me?.message,
+            src: currentSrc,
+            format: currentTrack?.format,
+          });
+          setError(`无法播放 ${file}: ${reason}${srcInfo}`);
           setPlaying(false);
         }}
       />
