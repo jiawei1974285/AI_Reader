@@ -2,7 +2,7 @@ use base64::engine::general_purpose::STANDARD as B64;
 use base64::Engine;
 use chardetng::EncodingDetector;
 use encoding_rs::Encoding;
-use mobi::headers::{Encryption, TextEncoding};
+use mobi::headers::{Compression, Encryption, TextEncoding};
 use mobi::Mobi;
 use regex::Regex;
 use std::collections::HashMap;
@@ -292,6 +292,56 @@ fn read_body(path: &Path) -> Result<(String, String, String), String> {
     // declare UTF-8 but contain GBK/GB18030 bytes (older Calibre conversions,
     // third-party Kindle tools, etc.). Run chardetng on raw bytes instead.
     let bytes = m.content_as_bytes();
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase();
+    // 注意: 这两个字段是 pub fields, 直接读不需 method (vendored crate)
+    let mh = &m.metadata.mobi;
+    let total_records = m.raw_records().records().len();
+    tracing::info!(
+        path = %path.display(),
+        ext = %ext,
+        compression = ?m.compression(),
+        encryption = ?m.encryption(),
+        text_encoding = ?m.text_encoding(),
+        readable_range = ?m.readable_records_range(),
+        first_huff_record = mh.first_huff_record,
+        huff_record_count = mh.huff_record_count,
+        first_image_index = mh.first_image_index,
+        first_content_record = mh.first_content_record,
+        first_non_book_index = mh.first_non_book_index,
+        total_raw_records = total_records,
+        content_bytes = bytes.len(),
+        "mobi read_body — content extraction"
+    );
+    if bytes.is_empty() {
+        // 如果是 Huff 压缩, 显式调一次 huff_data 拿具体 Err 暴露给日志.
+        // content_as_bytes 内部 Err(_) → Vec::new() 把错误吞了, 这里展开.
+        let huff_err_msg = if m.compression() == Compression::Huff {
+            match m.huff_data() {
+                Ok(_) => " (huff_data returned Ok but bytes empty — likely 0 sections)".to_string(),
+                Err(e) => format!(" — huff decode error: {e:?}"),
+            }
+        } else {
+            String::new()
+        };
+        tracing::error!(
+            path = %path.display(),
+            compression = ?m.compression(),
+            huff_error = %huff_err_msg,
+            "mobi read_body returned 0 bytes"
+        );
+        return Err(format!(
+            "MOBI/AZW 读出 0 字节正文 (compression={:?}, range={:?}){}. \
+             如果是 .azw3 Huff 压缩, 当前 mobi-rs vendor 解码失败. \
+             可暂用 Calibre ebook-convert 转 EPUB 后再打开.",
+            m.compression(),
+            m.readable_records_range(),
+            huff_err_msg
+        ));
+    }
     let body = decode_content_bytes(&bytes, m.text_encoding())?;
     let title = {
         let t = m.title();

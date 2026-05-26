@@ -88,15 +88,28 @@ impl<'a> RawRecords<'a> {
         if len == 0 {
             return &[];
         }
+        // [AIreader patch] 原实现两处 off-by-one:
+        //   - Excluded(b) end 写成 (*b-1).min(len-1) — Rust `..` 的 b 是 exclusive,
+        //     应直接当切片 end 用, 不该 -1.  实测 range(95..98) 只返 2 个 records
+        //     而非 3 个 → AZW3 Huff 解码只加载 1/2 CDIC dict → dict.len=1024,
+        //     section 引用 index 1393 → InvalidDictionaryIndex.
+        //   - Included(b) end 应是 b+1 (转 exclusive 切片).
+        //   - Excluded(b) start 应是 b+1 (Rust 没有 (b..) Excluded start 语法,
+        //     但 RangeBounds trait 允许); Included 才是 b.
+        // 这个 bug 同时还把 readable_records 少 1 个, 影响所有 mobi/azw 解析.
         let start = match range.start_bound() {
-            Bound::Excluded(b) | Bound::Included(b) => (*b).min(len - 1),
+            Bound::Included(b) => (*b).min(len),
+            Bound::Excluded(b) => b.saturating_add(1).min(len),
             Bound::Unbounded => 0,
         };
         let end = match range.end_bound() {
-            Bound::Excluded(b) => (*b - 1).min(len - 1),
-            Bound::Included(b) => (*b).min(len - 1),
+            Bound::Excluded(b) => (*b).min(len),
+            Bound::Included(b) => b.saturating_add(1).min(len),
             Bound::Unbounded => len,
         };
+        if start >= end {
+            return &[];
+        }
         &self.0[start..end]
     }
 }

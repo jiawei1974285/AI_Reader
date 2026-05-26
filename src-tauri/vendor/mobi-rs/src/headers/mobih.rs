@@ -176,7 +176,10 @@ pub struct MobiHeader {
     first_compilation_data_section_count: u32,
     data_section_count: u32,
     unused_8: u32,
-    extra_record_data_flags: u32,
+    /// [AIreader patch] pub: 给 huff_data 用来 trim section trailer
+    /// (multibyte char overlap + trailer entries), 不然 Huff unpack 跑到
+    /// trailer 字节会 EOF.
+    pub extra_record_data_flags: u32,
     pub first_index_record: u32,
     unused_9: Vec<u8>,
 }

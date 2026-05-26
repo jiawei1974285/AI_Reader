@@ -293,7 +293,11 @@ impl Mobi {
         Ok(record::content_to_string(&all_bytes, encoding)?)
     }
 
-    fn huff_data(&self) -> MobiResult<Vec<Vec<u8>>> {
+    /// [AIreader patch] 暴露为 pub 以便上层 reader 在 huff 失败时拿到具体
+    /// HuffmanError (CodeLenOutOfBounds / BadTerm / InvalidHuffHeader / etc),
+    /// 之前 `content_as_bytes` 把 Err 吞成 Vec::new(), 用户看到 "0 bytes" 但
+    /// 没法 debug 哪步挂.
+    pub fn huff_data(&self) -> MobiResult<Vec<Vec<u8>>> {
         let records = self.raw_records();
         let huff_start = self.metadata.mobi.first_huff_record as usize;
         let huff_count = self.metadata.mobi.huff_record_count as usize;
@@ -303,11 +307,19 @@ impl Mobi {
             .map(|record| record.content)
             .collect();
 
-        let sections: Vec<_> = records
+        // [AIreader patch] MOBI text record 末尾通常含 trailer 字节:
+        // - extra_data_flags bit 0 = 1: 末字节低 2 bits = N, 再去掉 N 字节
+        //   (multibyte char overlap)
+        // - extra_data_flags bits 1..32 = 各种 trailer entries
+        //   (variable-length encoded size at end)
+        // 不 trim 直接喂 Huff 解码会跑过末尾 → EOF / 错 codeword → 解码失败.
+        let flags = self.metadata.mobi.extra_record_data_flags;
+        let trimmed: Vec<Vec<u8>> = records
             .range(self.readable_records_range())
             .iter()
-            .map(|record| record.content)
+            .map(|record| trim_record_trailer(record.content, flags))
             .collect();
+        let sections: Vec<&[u8]> = trimmed.iter().map(|v| v.as_slice()).collect();
 
         Ok(huff::decompress(&huffs, &sections)?)
     }
@@ -414,9 +426,83 @@ impl Mobi {
     }
 }
 
+/// [AIreader patch] 按 MOBI extra_data_flags 去 record 尾部 trailer.
+///
+/// MOBI spec (https://wiki.mobileread.com/wiki/MOBI):
+///   - extra_data_flags bit 0 (LSB): 末字节低 2 bits = N, 再剥 N 字节
+///     (multibyte char overlap, 防 record 边界劈 UTF-8 char)
+///   - extra_data_flags bits 1..32 中每个 set bit 表示一个 trailer entry,
+///     entry 末字节高 bit=0 标识结束, length 用 7-bit variable encoding
+///     (类似 protobuf varint 但 MSB=1 表示 "继续", MSB=0 表示 "最后字节")
+///
+/// 不 trim 直接喂 Huff/PalmDoc 解码 → 解到 trailer 字节会产生错 codeword,
+/// 大概率 EOF (UnexpectedEof) 或读到坏 dict index.
+pub fn trim_record_trailer(data: &[u8], extra_data_flags: u32) -> Vec<u8> {
+    let mut end = data.len();
+    // trailer entries (bit 1..32). 按 spec 这些先剥, 再剥 multibyte overlap (bit 0).
+    let mut flags = extra_data_flags >> 1;
+    while flags != 0 && end > 0 {
+        if flags & 1 != 0 {
+            // 7-bit varint 在末尾, 从末字节向前读直到 MSB=1 字节
+            let mut size: usize = 0;
+            let mut bit_shift: u32 = 0;
+            let mut pos = end;
+            for _ in 0..4 {
+                if pos == 0 {
+                    break;
+                }
+                pos -= 1;
+                let byte = data[pos];
+                size |= ((byte & 0x7F) as usize) << bit_shift;
+                bit_shift += 7;
+                if (byte & 0x80) != 0 {
+                    break;
+                }
+            }
+            if size > 0 && size <= end {
+                end -= size;
+            }
+        }
+        flags >>= 1;
+    }
+    // multibyte char overlap (bit 0): 末字节低 2 bits 表示 "再去多少字节"
+    if (extra_data_flags & 1) != 0 && end > 0 {
+        let trail = (data[end - 1] & 0x3) as usize + 1;
+        if trail <= end {
+            end -= trail;
+        }
+    }
+    data[..end].to_vec()
+}
+
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn trim_trailer_no_flags() {
+        let data = b"hello";
+        assert_eq!(trim_record_trailer(data, 0), b"hello".to_vec());
+    }
+
+    #[test]
+    fn trim_trailer_multibyte_overlap_only() {
+        // last byte = 0x02 → low 2 bits = 2 → trail = 3 (= 2+1)
+        let mut data = b"abcdefghij".to_vec();
+        data.push(0x02); // trailing byte indicates trail size 3
+        let out = trim_record_trailer(&data, 0x1); // bit 0 set
+        assert_eq!(out, b"abcdefgh".to_vec()); // 去掉末 3 字节 (含 indicator)
+    }
+
+    #[test]
+    fn trim_trailer_one_trailer_entry() {
+        // 一个 trailer entry, size 字段 = 5 (varint single byte 0x85, MSB=1)
+        let mut data = b"hello, worldXXXXX".to_vec(); // 17 字节, 末 5 是 entry
+        data[12] = 0x85; // size varint 末字节 = 0x80 | 5
+        let out = trim_record_trailer(&data, 0b10); // bit 1 set
+        assert_eq!(out.len(), 12); // 去掉末 5 字节
+    }
+
     #[test]
     fn test_no_records() {
         let bytes = [

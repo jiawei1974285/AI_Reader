@@ -16,8 +16,10 @@ pub enum HuffmanError {
     InvalidHuffHeader,
     #[error("expected CDIC magic header")]
     InvalidCDICHeader,
-    #[error("the provided index to huffman dictionary was out of bounds")]
-    InvalidDictionaryIndex,
+    #[error("huffman dictionary index {index} out of bounds (dict_len={dict_len})")]
+    InvalidDictionaryIndex { index: usize, dict_len: usize },
+    #[error("max huffman recursion depth exceeded ({depth}) — likely self-referencing phrase in corrupt file")]
+    HuffDepthExceeded { depth: usize },
 }
 
 type HuffmanDictionary = Vec<Option<(Vec<u8>, bool)>>;
@@ -137,8 +139,21 @@ impl HuffmanDecoder {
         Ok(())
     }
 
-    // Unpacks data of a section (?)
+    // Unpacks data of a section. [AIreader patch] entry point delegates
+    // to `unpack_with_depth` so recursive expansion of dictionary phrases
+    // can bound stack depth (defense against self-referencing entries in
+    // corrupt files).
     fn unpack(&mut self, data: &[u8]) -> HuffmanResult<Vec<u8>> {
+        self.unpack_with_depth(data, 0)
+    }
+
+    fn unpack_with_depth(&mut self, data: &[u8], depth: usize) -> HuffmanResult<Vec<u8>> {
+        // [AIreader patch] 防自引用 phrase 死循环 / 栈溢出.
+        // 合法 huff/cdic 字典 phrase 引用是 DAG, 深度通常 ≤ 5;
+        // 32 远超合法上限, 偏向接受边缘情况而非误拒.
+        if depth > 32 {
+            return Err(HuffmanError::HuffDepthExceeded { depth });
+        }
         // Need len.
         let mut bits_left = data.len() * 8;
 
@@ -184,25 +199,34 @@ impl HuffmanDecoder {
             }
 
             let index = ((max_code - code) >> (32 - code_len)) as usize;
-            println!(
-                "max_code: {}, code: {}, code_len: {}, index: {}, dict_len: {}",
-                max_code,
-                code,
-                code_len,
-                index,
-                self.dictionary.len()
-            );
-            let (mut slice, flag) = std::mem::take(
-                self.dictionary
-                    .get_mut(index)
-                    .ok_or(HuffmanError::InvalidDictionaryIndex)?,
-            )
-            .ok_or(HuffmanError::InvalidDictionaryIndex)?;
-            if !flag {
-                slice = self.unpack(&slice)?;
-            }
-            unpacked.extend_from_slice(&slice);
-            self.dictionary[index] = Some((slice, true));
+            // [AIreader patch] 关键修复: 原实现用 std::mem::take 把 entry 置 None
+            // → 递归 unpack 同一 phrase 时报 InvalidDictionaryIndex.
+            // (实测: 多本中文 AZW3 Huff 解码全挂在这里, 用户报"0 字节正文".)
+            //
+            // 改用 clone-then-resolve:
+            //   1. 读 entry (不 take, 保留供同层后续 / 递归层访问)
+            //   2. flag=false → 递归 unpack raw bytes → 写回 cached + flag=true
+            //   3. flag=true → 直接用 cached
+            let (raw, flag) = {
+                let dict_len = self.dictionary.len();
+                let entry_opt = self
+                    .dictionary
+                    .get(index)
+                    .ok_or(HuffmanError::InvalidDictionaryIndex { index, dict_len })?;
+                let entry = entry_opt
+                    .as_ref()
+                    .ok_or(HuffmanError::InvalidDictionaryIndex { index, dict_len })?;
+                (entry.0.clone(), entry.1)
+            };
+            let resolved = if !flag {
+                let decoded = self.unpack_with_depth(&raw, depth + 1)?;
+                // cache resolved phrase, 后续访问 O(1)
+                self.dictionary[index] = Some((decoded.clone(), true));
+                decoded
+            } else {
+                raw
+            };
+            unpacked.extend_from_slice(&resolved);
 
             // code_len <= 32, so this is safe.
             n -= code_len as i8;
@@ -212,10 +236,6 @@ impl HuffmanDecoder {
                 Some(i) => i,
             };
         }
-
-        // [AIreader patch] Removed stray `println!("unpacked: …")` that
-        // was dumping every HUFF section to stdout — fills the terminal
-        // and slows large books to a crawl.
 
         Ok(unpacked)
     }
@@ -232,7 +252,8 @@ impl HuffmanDecoder {
         let mut decoder = Self::default();
         decoder.load_huff(huffs[0])?;
         decoder.load_cdic_records(&huffs[1..])?;
-        eprintln!("{:#?}", decoder);
+        // [AIreader patch] removed eprintln! that dumped entire decoder
+        // (huge dictionary) to stderr on every AZW3 open.
         Ok(decoder)
     }
 }

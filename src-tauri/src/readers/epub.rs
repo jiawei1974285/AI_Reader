@@ -345,23 +345,47 @@ where
     F: FnMut(&Path) -> Option<(Vec<u8>, String)>,
 {
     let mut replacements: Vec<(String, String)> = Vec::new();
+    let mut matched: usize = 0;
+    let mut skipped_absolute: usize = 0;
+    let mut load_failed: usize = 0;
+    let mut sample_unresolved: Option<String> = None;
     for caps in RESOURCE_REF_RE.captures_iter(html) {
+        matched += 1;
         let whole = caps.get(0).unwrap().as_str().to_string();
         let src = caps.get(2).unwrap().as_str();
 
         // Skip absolute URLs and already-inlined data: URIs.
         if src.starts_with("data:") || src.starts_with("http://") || src.starts_with("https://") {
+            skipped_absolute += 1;
             continue;
         }
 
         let resolved = resolve_path_against(&chapter_dir, src);
         let Some((bytes, mime)) = load(&resolved) else {
+            load_failed += 1;
+            if sample_unresolved.is_none() {
+                sample_unresolved = Some(format!(
+                    "src={:?} → resolved={}",
+                    src,
+                    resolved.display()
+                ));
+            }
             continue;
         };
         let data_uri = format!("data:{};base64,{}", mime, B64.encode(&bytes));
         let new_tag = whole.replacen(src, &data_uri, 1);
         replacements.push((whole, new_tag));
     }
+
+    tracing::info!(
+        chapter_dir = %chapter_dir.display(),
+        matched_tags = matched,
+        inlined = replacements.len(),
+        skipped_absolute,
+        load_failed,
+        sample_unresolved = ?sample_unresolved,
+        "epub inline_resource_refs"
+    );
 
     let mut out = html.to_string();
     for (old, new) in replacements {
@@ -408,18 +432,24 @@ fn hex_val(b: u8) -> Option<u8> {
 }
 
 fn normalize(p: &Path) -> PathBuf {
-    let mut out = PathBuf::new();
+    // EPUB zip entries 内部路径恒用 forward slash. 在 Windows 上 `PathBuf::push`
+    // 会插 `\`, 导致 `images\00008.jpeg` 跟 zip 里的 `images/00008.jpeg` 比对失败,
+    // 实测一本插图本所有 <img> 都 load_failed.
+    // 改用 String 收集 segment + 用 "/" 拼回, 跨平台稳.
+    let mut parts: Vec<String> = Vec::new();
     for comp in p.components() {
         match comp {
             Component::ParentDir => {
-                out.pop();
+                parts.pop();
             }
             Component::CurDir => {}
-            Component::Normal(s) => out.push(s),
-            Component::RootDir | Component::Prefix(_) => out.push(comp.as_os_str()),
+            Component::Normal(s) => parts.push(s.to_string_lossy().into_owned()),
+            Component::RootDir | Component::Prefix(_) => {
+                // EPUB 内部路径都是相对的, 不应出现绝对路径根 — 忽略
+            }
         }
     }
-    out
+    PathBuf::from(parts.join("/"))
 }
 
 fn guess_mime_from_ext(p: &Path) -> String {
