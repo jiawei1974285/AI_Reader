@@ -39,6 +39,26 @@ fn guard<T, F: FnOnce() -> Result<T, String>>(label: &str, f: F) -> Result<T, St
     }
 }
 
+#[cfg(test)]
+mod local_regression_tests {
+    use super::*;
+
+    #[test]
+    fn huff_azw3_sample_extracts_text_when_configured() {
+        let Ok(path) = std::env::var("AIREADER_AZW3_HUFF_SAMPLE") else {
+            eprintln!("set AIREADER_AZW3_HUFF_SAMPLE to run the local AZW3 Huff regression");
+            return;
+        };
+
+        let (_title, _author, body) = read_body(Path::new(&path)).unwrap();
+
+        assert!(
+            body.chars().filter(|c| !c.is_whitespace()).count() > 1_000,
+            "expected substantial decoded body text from {path}"
+        );
+    }
+}
+
 /// MOBI 支持采取最小可行策略：
 /// - 元数据：`title()` / `author()` 直接走 mobi crate
 /// - 正文：`content_as_string_lossy()` 一次拿到整本 HTML / 文本
@@ -498,12 +518,18 @@ fn sanitize_sparse_decode_markers(s: &str) -> String {
     if total == 0 {
         return String::new();
     }
-    let bad = s.chars().filter(|c| matches!(*c, '\u{FFFD}' | '□')).count();
-    if bad > 3 && (bad as f64 / total as f64) > 0.005 {
+    let bad = s
+        .chars()
+        .filter(|c| matches!(*c, '\u{FFFD}' | '□') || (c.is_control() && !matches!(*c, '\n' | '\r' | '\t')))
+        .count();
+    if bad > 3 && (bad as f64 / total as f64) > 0.15 {
         return s.to_string();
     }
     s.chars()
-        .filter(|c| !matches!(*c, '\u{FFFD}' | '□'))
+        .filter(|c| {
+            !matches!(*c, '\u{FFFD}' | '□')
+                && (!c.is_control() || matches!(*c, '\n' | '\r' | '\t'))
+        })
         .collect()
 }
 
@@ -559,7 +585,6 @@ fn decoded_body_is_garbage(s: &str) -> bool {
     let control_ratio = controls as f64 / total_f;
     let readable_ratio =
         (cjk_ideographs + kana_hangul + ascii) as f64 / total_f;
-
     bad_ratio > 0.02 || control_ratio > 0.02 || (!has_markup && readable_ratio < 0.45)
 }
 

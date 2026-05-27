@@ -199,6 +199,20 @@ mod tests {
     }
 
     #[test]
+    fn splits_sse_messages_with_crlf_boundaries() {
+        let mut buffer =
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}\r\n\r\n".to_string();
+
+        let message = next_sse_message(&mut buffer).expect("CRLF SSE boundary should split");
+
+        assert_eq!(
+            message,
+            "data: {\"choices\":[{\"delta\":{\"content\":\"hi\"}}]}"
+        );
+        assert!(buffer.is_empty());
+    }
+
+    #[test]
     fn parses_entities_from_fenced_json_reply() {
         let reply = r#"```json
 [
@@ -822,10 +836,9 @@ async fn stream_chat_to_events(
         let text = String::from_utf8_lossy(&bytes);
         buffer.push_str(&text);
 
-        // SSE messages are separated by blank lines (\n\n).
-        while let Some(idx) = buffer.find("\n\n") {
-            let message = buffer[..idx].to_string();
-            buffer = buffer[idx + 2..].to_string();
+        // SSE messages are separated by a blank line. Providers differ on
+        // LF vs CRLF, so accept both forms.
+        while let Some(message) = next_sse_message(&mut buffer) {
             for line in message.lines() {
                 let line = line.trim();
                 let Some(payload) = line.strip_prefix("data:") else {
@@ -1380,6 +1393,26 @@ fn strip_code_fence(s: &str) -> String {
     let t = t.strip_prefix("```").unwrap_or(t);
     let t = t.strip_suffix("```").unwrap_or(t);
     t.trim().to_string()
+}
+
+fn next_sse_message(buffer: &mut String) -> Option<String> {
+    let lf = buffer.find("\n\n").map(|idx| (idx, 2usize));
+    let crlf = buffer.find("\r\n\r\n").map(|idx| (idx, 4usize));
+    let (idx, sep_len) = match (lf, crlf) {
+        (Some(a), Some(b)) => {
+            if a.0 <= b.0 {
+                a
+            } else {
+                b
+            }
+        }
+        (Some(a), None) => a,
+        (None, Some(b)) => b,
+        (None, None) => return None,
+    };
+    let message = buffer[..idx].trim_end_matches('\r').to_string();
+    buffer.replace_range(..idx + sep_len, "");
+    Some(message)
 }
 
 // ---------- Phase 5.C: music tagging + chapter-aware recommendations ----------

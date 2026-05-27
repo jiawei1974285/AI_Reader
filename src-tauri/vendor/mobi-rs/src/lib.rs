@@ -317,7 +317,7 @@ impl Mobi {
         let trimmed: Vec<Vec<u8>> = records
             .range(self.readable_records_range())
             .iter()
-            .map(|record| trim_record_trailer(record.content, flags))
+            .map(|record| trim_record_trailer_kindle(record.content, flags))
             .collect();
         let sections: Vec<&[u8]> = trimmed.iter().map(|v| v.as_slice()).collect();
 
@@ -473,6 +473,47 @@ pub fn trim_record_trailer(data: &[u8], extra_data_flags: u32) -> Vec<u8> {
         }
     }
     data[..end].to_vec()
+}
+
+fn trim_record_trailer_kindle(data: &[u8], extra_data_flags: u32) -> Vec<u8> {
+    let mut end = data.len();
+    let mut flags = (extra_data_flags & 0xFFFF) as u16;
+    let multibyte = (flags & 1) != 0;
+    let mut trailers = 0usize;
+    while flags > 1 {
+        if (flags & 2) != 0 {
+            trailers += 1;
+        }
+        flags >>= 1;
+    }
+
+    for _ in 0..trailers {
+        let size = trailing_data_entry_size(&data[..end]);
+        if size == 0 || size > end {
+            break;
+        }
+        end -= size;
+    }
+
+    if multibyte && end > 0 {
+        let trail = (data[end - 1] & 0x3) as usize + 1;
+        if trail <= end {
+            end -= trail;
+        }
+    }
+    data[..end].to_vec()
+}
+
+fn trailing_data_entry_size(data: &[u8]) -> usize {
+    let start = data.len().saturating_sub(4);
+    let mut size = 0usize;
+    for byte in &data[start..] {
+        if (byte & 0x80) != 0 {
+            size = 0;
+        }
+        size = (size << 7) | ((byte & 0x7F) as usize);
+    }
+    size
 }
 
 #[cfg(test)]
