@@ -686,7 +686,11 @@ impl ThinkStripper {
                 }
                 // Hold back the tail (could contain a partial `</think>`)
                 // and drop the rest.
-                let cutoff = self.pending.len().saturating_sub(8);
+                // 同 line 706: 找最近 char boundary 防 UTF-8 中间 drain panic.
+                let mut cutoff = self.pending.len().saturating_sub(8);
+                while cutoff > 0 && !self.pending.is_char_boundary(cutoff) {
+                    cutoff -= 1;
+                }
                 if cutoff > 0 {
                     self.pending.drain(..cutoff);
                 }
@@ -699,10 +703,15 @@ impl ThinkStripper {
                     continue;
                 }
                 // Hold back last 7 bytes (could be the start of `<think>`).
-                let cutoff = self.pending.len().saturating_sub(7);
+                // 注释里说"tags are ASCII 所以 cutoff 一定在 char boundary"是错的:
+                // pending 内容里有任意 UTF-8 (中文 3 byte/字), len-7 可能落在中文
+                // char 的第 2 byte → drain panic. 找不超过 cutoff 的最近 char
+                // boundary, 防 panic.
+                let mut cutoff = self.pending.len().saturating_sub(7);
+                while cutoff > 0 && !self.pending.is_char_boundary(cutoff) {
+                    cutoff -= 1;
+                }
                 if cutoff > 0 {
-                    // Tags are ASCII so cutoff is always at a char
-                    // boundary; the bytes before it are safe to emit.
                     let head: String = self.pending.drain(..cutoff).collect();
                     out.push_str(&head);
                 }
