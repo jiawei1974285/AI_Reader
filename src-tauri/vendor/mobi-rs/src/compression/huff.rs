@@ -249,17 +249,22 @@ impl HuffmanDecoder {
                 (index, entry.0.clone(), entry.1)
             };
             let resolved = if !flag {
-                let decoded = if stack.contains(&index) {
+                if stack.contains(&index) {
+                    // [AIreader patch] 循环引用兜底: 用 raw 字节
+                    // 但**不要 cache** — raw 是未解码的 huff bits, cache 成
+                    // (raw, flag=true) 会让下次合法访问吐出未解码字节, 表现为
+                    // 整本书出现"幻读" phrase 反复插入 (用户实测 3 本均触发).
+                    // 不 cache 时下次访问会再走解码路径 (此时 stack 可能已弹空,
+                    // 能正常解), 即使再 hit cycle 也仅这一次 phrase 错, 不污染.
                     raw.clone()
                 } else {
                     stack.push(index);
                     let decoded = self.unpack_with_stack(&raw, stack)?;
                     stack.pop();
+                    // 只有真正解码出来的才 cache
+                    self.dictionary[index] = Some((decoded.clone(), true));
                     decoded
-                };
-                // cache resolved phrase, 后续访问 O(1)
-                self.dictionary[index] = Some((decoded.clone(), true));
-                decoded
+                }
             } else {
                 raw
             };
