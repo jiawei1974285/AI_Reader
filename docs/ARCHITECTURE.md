@@ -104,9 +104,13 @@ src/
 │
 └── features/                # 按业务切，不按"组件类型"切
     ├── library/
-    │   ├── LibraryView.tsx        # 书架：搜索 / 排序 / 分类 / 推荐
+    │   ├── LibraryView.tsx        # 书架：搜索 / 排序 / 分类 / 推荐 / 帮助入口
     │   ├── BookCard.tsx           # 单本书卡片（封面+元数据）
+    │   ├── BookRating.tsx         # 1-5 星个人评分控件
     │   └── RecommendPanel.tsx     # AI 推荐展示
+    │
+    ├── help/
+    │   └── HelpPanel.tsx          # 纯前端内置使用帮助右侧抽屉
     │
     ├── reader/
     │   ├── EpubView.tsx           # EPUB / TXT / DOCX 共用渲染器
@@ -220,6 +224,7 @@ LibraryView 「扫描书库」按钮
 | 阅读进度 (spine_index, scroll_y) | `reading_progress` 表 | 滚动事件 throttle / chapter 切换 |
 | 标注 | `highlights` 表 | 涂色 / 编辑注释 / 删除立即写 |
 | 阅读时长 | `books.read_time_ms` | 30s 心跳，clip ≤ 1.5× tick |
+| 书籍评分 | `books.user_rating` | 书架卡片 / 阅读页星号点击立即写 |
 | AI 设置 | `app_config[ai_settings]` (JSON) | 设置面板保存按钮 |
 | Reader 设置 | `app_config[reader_settings]` (JSON) | 字号/主题切换立即写 |
 | 书库根 / 音乐根 | `app_config[library_root / music_root]` | 选目录立即写 |

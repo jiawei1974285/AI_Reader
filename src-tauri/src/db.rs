@@ -223,6 +223,7 @@ pub fn run_migrations(conn: &Connection) -> rusqlite::Result<()> {
         "ALTER TABLE books ADD COLUMN read_time_ms INTEGER NOT NULL DEFAULT 0",
         [],
     );
+    let _ = conn.execute("ALTER TABLE books ADD COLUMN user_rating INTEGER", []);
     // A4 (CLAUDE.md 原则 8 + 13): 进度锚定从「绝对像素」升级为「段索引 +
     // 段内字符偏移」。字号/字体/主题切换时不会再丢位置。`scroll_y` 保留作
     // fallback（老数据 + 新锚定失败时仍可用）。
@@ -329,6 +330,8 @@ pub struct Book {
     pub cover_path: Option<String>,
     #[serde(default)]
     pub read_time_ms: i64,
+    #[serde(default)]
+    pub user_rating: Option<i64>,
 }
 
 pub fn config_get(conn: &Connection, key: &str) -> rusqlite::Result<Option<String>> {
@@ -376,7 +379,7 @@ pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<Book>> {
     let mut stmt = conn.prepare(
         "SELECT b.id, b.file_path, b.format, b.title, b.author, b.added_at,
                 b.file_size, b.file_modified, b.category, p.updated_at,
-                b.cover_path, b.read_time_ms
+                b.cover_path, b.read_time_ms, b.user_rating
          FROM books b
          LEFT JOIN reading_progress p ON p.book_id = b.id
          ORDER BY b.added_at DESC, b.title ASC",
@@ -395,6 +398,7 @@ pub fn list_books(conn: &Connection) -> rusqlite::Result<Vec<Book>> {
             last_read_at: row.get(9)?,
             cover_path: row.get(10)?,
             read_time_ms: row.get(11)?,
+            user_rating: row.get(12)?,
         })
     })?;
     rows.collect()
@@ -404,7 +408,7 @@ pub fn get_book_by_path(conn: &Connection, path: &str) -> rusqlite::Result<Optio
     conn.query_row(
         "SELECT b.id, b.file_path, b.format, b.title, b.author, b.added_at,
                 b.file_size, b.file_modified, b.category, p.updated_at,
-                b.cover_path, b.read_time_ms
+                b.cover_path, b.read_time_ms, b.user_rating
          FROM books b
          LEFT JOIN reading_progress p ON p.book_id = b.id
          WHERE b.file_path = ?1",
@@ -423,10 +427,54 @@ pub fn get_book_by_path(conn: &Connection, path: &str) -> rusqlite::Result<Optio
                 last_read_at: row.get(9)?,
                 cover_path: row.get(10)?,
                 read_time_ms: row.get(11)?,
+                user_rating: row.get(12)?,
             })
         },
     )
     .optional()
+}
+
+pub fn get_book_by_id(conn: &Connection, book_id: i64) -> rusqlite::Result<Option<Book>> {
+    conn.query_row(
+        "SELECT b.id, b.file_path, b.format, b.title, b.author, b.added_at,
+                b.file_size, b.file_modified, b.category, p.updated_at,
+                b.cover_path, b.read_time_ms, b.user_rating
+         FROM books b
+         LEFT JOIN reading_progress p ON p.book_id = b.id
+         WHERE b.id = ?1",
+        params![book_id],
+        |row| {
+            Ok(Book {
+                id: row.get(0)?,
+                file_path: row.get(1)?,
+                format: row.get(2)?,
+                title: row.get(3)?,
+                author: row.get(4)?,
+                added_at: row.get(5)?,
+                file_size: row.get(6)?,
+                file_modified: row.get(7)?,
+                category: row.get(8)?,
+                last_read_at: row.get(9)?,
+                cover_path: row.get(10)?,
+                read_time_ms: row.get(11)?,
+                user_rating: row.get(12)?,
+            })
+        },
+    )
+    .optional()
+}
+
+pub fn set_book_rating(
+    conn: &Connection,
+    book_id: i64,
+    rating: Option<i64>,
+) -> rusqlite::Result<()> {
+    let normalized = rating.map(|r| r.clamp(1, 5));
+    conn.execute(
+        "UPDATE books SET user_rating = ?1 WHERE id = ?2",
+        params![normalized, book_id],
+    )?;
+    Ok(())
 }
 
 pub fn add_read_time(conn: &Connection, book_id: i64, delta_ms: i64) -> rusqlite::Result<()> {
@@ -696,12 +744,13 @@ pub fn list_books_for_douban_refresh(
     let mut stmt = conn.prepare(
         "SELECT b.id, b.file_path, b.format, b.title, b.author, b.added_at,
                 b.file_size, b.file_modified, b.category, p.updated_at,
-                b.cover_path, b.read_time_ms
+                b.cover_path, b.read_time_ms, b.user_rating
          FROM books b
          LEFT JOIN reading_progress p ON p.book_id = b.id
          LEFT JOIN douban_book_metadata dm ON dm.book_id = b.id
          WHERE ?1 OR dm.book_id IS NULL
-         ORDER BY b.added_at DESC, b.title ASC",
+         ORDER BY b.added_at DESC, b.title ASC
+         LIMIT CASE WHEN ?1 THEN -1 ELSE 20 END",
     )?;
     let rows = stmt.query_map(params![force], |row| {
         Ok(Book {
@@ -717,6 +766,7 @@ pub fn list_books_for_douban_refresh(
             last_read_at: row.get(9)?,
             cover_path: row.get(10)?,
             read_time_ms: row.get(11)?,
+            user_rating: row.get(12)?,
         })
     })?;
     rows.collect()
@@ -1378,9 +1428,8 @@ pub fn normalize_tags(raw: &[String]) -> Vec<String> {
 }
 
 pub fn list_book_tags(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<String>> {
-    let mut stmt = conn.prepare(
-        "SELECT tag FROM book_tags WHERE book_id = ?1 ORDER BY created_at ASC, tag ASC",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT tag FROM book_tags WHERE book_id = ?1 ORDER BY created_at ASC, tag ASC")?;
     let rows = stmt.query_map(params![book_id], |row| row.get::<_, String>(0))?;
     rows.collect()
 }
@@ -1436,9 +1485,8 @@ pub struct BookTagRow {
 /// Bulk-load tags for many books in one query — used by `list_books`
 /// shaped views that want to attach tags without N+1.
 pub fn list_all_book_tags(conn: &Connection) -> rusqlite::Result<Vec<BookTagRow>> {
-    let mut stmt = conn.prepare(
-        "SELECT book_id, tag FROM book_tags ORDER BY book_id, created_at ASC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT book_id, tag FROM book_tags ORDER BY book_id, created_at ASC")?;
     let rows = stmt.query_map([], |row| {
         Ok(BookTagRow {
             book_id: row.get(0)?,
@@ -1500,8 +1548,7 @@ pub struct BookSignal {
 }
 
 /// 已知信号白名单——防 LLM 或前端 bug 灌脏数据。
-pub const ALLOWED_BOOK_SIGNALS: &[&str] =
-    &["dismissed", "queued", "completed", "boosted"];
+pub const ALLOWED_BOOK_SIGNALS: &[&str] = &["dismissed", "queued", "completed", "boosted"];
 
 pub fn record_book_signal(
     conn: &Connection,
@@ -1531,17 +1578,13 @@ pub fn delete_book_signal(
 
 /// 拿"被打上 dismissed 标签"的所有 book_id。recommend 用它做硬过滤。
 pub fn list_dismissed_book_ids(conn: &Connection) -> rusqlite::Result<Vec<i64>> {
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT book_id FROM book_signals WHERE signal = 'dismissed'",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT DISTINCT book_id FROM book_signals WHERE signal = 'dismissed'")?;
     let rows = stmt.query_map([], |row| row.get::<_, i64>(0))?;
     rows.collect()
 }
 
-pub fn list_signals_for_book(
-    conn: &Connection,
-    book_id: i64,
-) -> rusqlite::Result<Vec<BookSignal>> {
+pub fn list_signals_for_book(conn: &Connection, book_id: i64) -> rusqlite::Result<Vec<BookSignal>> {
     let mut stmt = conn.prepare(
         "SELECT id, book_id, signal, ts FROM book_signals
          WHERE book_id = ?1 ORDER BY ts DESC",
@@ -1599,7 +1642,15 @@ pub fn create_ai_note(
     conn.execute(
         "INSERT INTO ai_notes (book_id, spine_index, mode, question, answer, hits_json, created_at)
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![book_id, spine_index, mode, question, answer, hits_json, now_ms],
+        params![
+            book_id,
+            spine_index,
+            mode,
+            question,
+            answer,
+            hits_json,
+            now_ms
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -1826,12 +1877,7 @@ mod tests {
 
     #[test]
     fn normalize_tags_caps_at_three() {
-        let raw: Vec<String> = vec![
-            "历史".into(),
-            "科技".into(),
-            "哲学".into(),
-            "心理".into(),
-        ];
+        let raw: Vec<String> = vec!["历史".into(), "科技".into(), "哲学".into(), "心理".into()];
         let out = normalize_tags(&raw);
         assert_eq!(out.len(), 3);
         assert_eq!(

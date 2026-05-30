@@ -4,6 +4,7 @@ import type { Highlight } from "@/lib/ipc";
 
 export type PendingSelection = {
   rect: DOMRect;
+  rects: DOMRect[];
   spineIdx: number;
   selectedText: string;
   prefix: string;
@@ -81,6 +82,7 @@ export function useSelectionPopover({
         }
         setPendingSel({
           rect: cap.rect,
+          rects: cap.rects,
           spineIdx: Number(section.dataset.spine),
           selectedText: cap.selectedText,
           prefix: cap.prefix,
@@ -95,9 +97,10 @@ export function useSelectionPopover({
   // 2. mousedown 外部 → dismiss
   useEffect(() => {
     function onMouseDown(e: MouseEvent) {
-      const target = e.target as HTMLElement;
+      const target = eventElement(e.target);
+      if (!target) return;
       if (toolbarRef.current && toolbarRef.current.contains(target)) return;
-      if (target.closest && target.closest("mark.ai-hl")) return;
+      if (target.closest("mark.ai-hl")) return;
       setPendingSel(null);
     }
     document.addEventListener("mousedown", onMouseDown);
@@ -109,8 +112,8 @@ export function useSelectionPopover({
     const root = scrollRef.current;
     if (!root) return;
     function onClick(e: Event) {
-      const target = e.target as HTMLElement;
-      if (target.closest(".ai-entity")) return;
+      const target = eventElement(e.target);
+      if (!target) return;
       const mark = target.closest("mark.ai-hl") as HTMLElement | null;
       if (!mark) return;
       e.preventDefault();
@@ -125,4 +128,10 @@ export function useSelectionPopover({
   }, [allHighlights, scrollRef]);
 
   return { pendingSel, setPendingSel, activeHl, setActiveHl };
+}
+
+function eventElement(target: EventTarget | null): HTMLElement | null {
+  if (target instanceof HTMLElement) return target;
+  if (target instanceof Node) return target.parentElement;
+  return null;
 }

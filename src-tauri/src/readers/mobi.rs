@@ -57,6 +57,40 @@ mod local_regression_tests {
             "expected substantial decoded body text from {path}"
         );
     }
+
+    #[test]
+    fn huff_azw3_sample_does_not_mix_dictionary_phrases_when_configured() {
+        let Ok(path) = std::env::var("AIREADER_AZW3_CLEAN_SAMPLE") else {
+            return;
+        };
+
+        let (_title, _author, body) = read_body(Path::new(&path)).unwrap();
+
+        for marker in [
+            "发射火箭弹。 &#160; &#160;失败",
+            "功课学得很好，G",
+            "功课学得很好，GI5\">",
+            "/?iS",
+        ] {
+            assert!(
+                !body.contains(marker),
+                "decoded body from {path} contains repeated wrong Huff phrase: {marker}"
+            );
+        }
+    }
+
+    #[test]
+    fn fallback_azw3_sample_does_not_show_base64_when_configured() {
+        let Ok(path) = std::env::var("AIREADER_AZW3_BASE64_SAMPLE") else {
+            return;
+        };
+
+        let preview = read_mobi_chapter(path, 3).unwrap();
+
+        assert!(!preview.html.contains("data:image"));
+        assert!(!preview.html.contains("base64"));
+        assert!(!preview.html.contains("OAf60CDBZvvdeaIzuVT346"));
+    }
 }
 
 /// MOBI 支持采取最小可行策略：
@@ -193,7 +227,7 @@ fn split_chapters(body: &str) -> Vec<MobiChapter> {
         if heading_chapters.len() > 1 {
             chapters = heading_chapters;
         } else if body.chars().count() > FALLBACK_CHUNK_CHARS {
-            chapters = chunk_by_chars(body, FALLBACK_CHUNK_CHARS);
+            chapters = chunk_by_chars(&fallback_visible_html(body), FALLBACK_CHUNK_CHARS);
         }
     }
 
@@ -271,6 +305,67 @@ fn chunk_by_chars(text: &str, n: usize) -> Vec<MobiChapter> {
         idx += 1;
     }
     chapters
+}
+
+fn fallback_visible_html(html: &str) -> String {
+    let mut out = String::with_capacity(html.len().min(256_000));
+    let mut in_tag = false;
+    let mut tag = String::new();
+
+    for c in html.chars() {
+        match c {
+            '<' => {
+                in_tag = true;
+                tag.clear();
+            }
+            '>' if in_tag => {
+                in_tag = false;
+                let tag_lower = tag.to_ascii_lowercase();
+                if tag_lower.starts_with("p")
+                    || tag_lower.starts_with("/p")
+                    || tag_lower.starts_with("br")
+                    || tag_lower.starts_with("div")
+                    || tag_lower.starts_with("/div")
+                    || tag_lower.starts_with("h1")
+                    || tag_lower.starts_with("/h1")
+                    || tag_lower.starts_with("h2")
+                    || tag_lower.starts_with("/h2")
+                    || tag_lower.starts_with("h3")
+                    || tag_lower.starts_with("/h3")
+                {
+                    out.push('\n');
+                }
+            }
+            _ if in_tag => tag.push(c),
+            _ => out.push(c),
+        }
+    }
+
+    let text = html_unescape_basic(&out);
+    text.lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(|line| format!("<p>{}</p>", escape_html(line)))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+fn html_unescape_basic(s: &str) -> String {
+    s.replace("&nbsp;", " ")
+        .replace("&#160;", " ")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+}
+
+fn escape_html(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#39;")
 }
 
 fn strip_tags(s: &str) -> String {
@@ -520,15 +615,16 @@ fn sanitize_sparse_decode_markers(s: &str) -> String {
     }
     let bad = s
         .chars()
-        .filter(|c| matches!(*c, '\u{FFFD}' | '□') || (c.is_control() && !matches!(*c, '\n' | '\r' | '\t')))
+        .filter(|c| {
+            matches!(*c, '\u{FFFD}' | '□') || (c.is_control() && !matches!(*c, '\n' | '\r' | '\t'))
+        })
         .count();
     if bad > 3 && (bad as f64 / total as f64) > 0.15 {
         return s.to_string();
     }
     s.chars()
         .filter(|c| {
-            !matches!(*c, '\u{FFFD}' | '□')
-                && (!c.is_control() || matches!(*c, '\n' | '\r' | '\t'))
+            !matches!(*c, '\u{FFFD}' | '□') && (!c.is_control() || matches!(*c, '\n' | '\r' | '\t'))
         })
         .collect()
 }
@@ -583,8 +679,7 @@ fn decoded_body_is_garbage(s: &str) -> bool {
     let total_f = total as f64;
     let bad_ratio = bad as f64 / total_f;
     let control_ratio = controls as f64 / total_f;
-    let readable_ratio =
-        (cjk_ideographs + kana_hangul + ascii) as f64 / total_f;
+    let readable_ratio = (cjk_ideographs + kana_hangul + ascii) as f64 / total_f;
     bad_ratio > 0.02 || control_ratio > 0.02 || (!has_markup && readable_ratio < 0.45)
 }
 
@@ -831,6 +926,26 @@ mod tests {
         assert!(chapters[0].html.contains("alpha"));
         assert!(chapters[1].html.contains("beta"));
         assert!(chapters[2].html.contains("gamma"));
+    }
+
+    #[test]
+    fn fallback_chunks_do_not_expose_inline_image_base64() {
+        let image = "OA".repeat(FALLBACK_CHUNK_CHARS);
+        let body = format!(
+            "<html><body><p>before text</p><img src=\"data:image/jpeg;base64,{image}\" /><p>after text</p></body></html>"
+        );
+
+        let chapters = split_chapters(&body);
+        let joined = chapters
+            .iter()
+            .map(|ch| ch.html.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(joined.contains("before text"));
+        assert!(joined.contains("after text"));
+        assert!(!joined.contains("data:image"));
+        assert!(!joined.contains(&"OA".repeat(256)));
     }
 
     #[test]

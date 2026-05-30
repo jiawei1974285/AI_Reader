@@ -28,6 +28,7 @@ import { useChapterEntities } from "./useChapterEntities";
 import { BookSearch } from "./BookSearch";
 import { BookmarksPanel } from "./BookmarksPanel";
 import { ChapterEntitiesPanel } from "./ChapterEntitiesPanel";
+import { BookRating } from "@/features/library/BookRating";
 import {
   applyEntityUnderlines,
   type EntityWithKey,
@@ -38,6 +39,9 @@ type Props = {
   bookId: number;
   aiSettings: AiSettings;
   onOpenAiSettings: () => void;
+  onOpenHelp: () => void;
+  bookRating?: number | null;
+  onRateBook: (rating: number | null) => void;
   onBack: () => void;
   backLabel?: string;
   initialSpine?: number;
@@ -60,6 +64,9 @@ export function EpubView({
   bookId,
   aiSettings,
   onOpenAiSettings,
+  onOpenHelp,
+  bookRating,
+  onRateBook,
   onBack,
   backLabel = "返回书架",
   initialSpine,
@@ -85,6 +92,7 @@ export function EpubView({
   const [pageMaxOffset, setPageMaxOffset] = useState(0);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [companionOpen, setCompanionOpen] = useState(false);
   const [musicSuggestOpen, setMusicSuggestOpen] = useState(false);
   const [lookupSel, setLookupSel] = useState<{
     text: string;
@@ -877,6 +885,19 @@ export function EpubView({
     }
   }
 
+  const handleReaderLinkClick = useCallback(
+    (e: React.MouseEvent<HTMLElement>) => {
+      const target = e.target as HTMLElement | null;
+      const link = target?.closest?.("a[href]") as HTMLAnchorElement | null;
+      if (!link) return;
+
+      e.preventDefault();
+      e.stopPropagation();
+      scrollBookAnchorIntoView(scrollRef.current, link.getAttribute("href"), isPagedMode);
+    },
+    [isPagedMode],
+  );
+
   const atLast =
     chapters.length > 0 &&
     chapters[chapters.length - 1].spine_index >= total - 1;
@@ -924,7 +945,7 @@ export function EpubView({
 
   return (
     <div className="app-frame relative flex flex-col">
-      <header className="studio-header reader-header flex items-center justify-between">
+      <header className="studio-header reader-header reader-header-quiet flex items-center justify-between">
         <div className="reader-header-title min-w-0">
           <h2 className="studio-title text-lg leading-tight truncate">
             {head?.title}
@@ -935,6 +956,9 @@ export function EpubView({
         </div>
         <div className="reader-toolbar text-xs">
           <div className="reader-toolbar-group">
+            <button onClick={onBack} className="studio-ghost">
+              {backLabel}
+            </button>
             <button
               onClick={() =>
                 setSettings((s) => ({
@@ -949,85 +973,43 @@ export function EpubView({
               目录
             </button>
             <button
-              onClick={() => setAnnotationsOpen(true)}
-              className="studio-ghost"
-            >
-              标注{allHighlights.length > 0 ? ` · ${allHighlights.length}` : ""}
-            </button>
-            <button
-              onClick={addBookmark}
-              className="studio-ghost"
-              title="保存当前阅读位置"
-            >
-              书签
-            </button>
-            <button
-              onClick={() => setBookmarksOpen(true)}
-              className={`studio-ghost ${
-                bookmarksOpen ? "studio-ghost-active" : ""
-              }`}
-              title="查看当前书的书签"
-            >
-              书签列表{bookmarks.length > 0 ? ` · ${bookmarks.length}` : ""}
-            </button>
-            <button
               onClick={() => setSearchOpen(true)}
               className="studio-ghost"
               title="本书内查找 (Ctrl+F)"
             >
               查找
             </button>
+            <button
+              onClick={() => setBookmarksOpen(true)}
+              className={`studio-ghost ${
+                bookmarksOpen ? "studio-ghost-active" : ""
+              }`}
+              title="书签列表"
+            >
+              书签{bookmarks.length > 0 ? ` ${bookmarks.length}` : ""}
+            </button>
             <button onClick={() => setChatOpen(true)} className="studio-ghost">
               问 AI
             </button>
             <button
-              onClick={() => setMusicSuggestOpen(true)}
-              className="studio-ghost"
-            >
-              AI 配乐
-            </button>
-            <button
-              onClick={() => setEntitiesOpen((v) => !v)}
-              className={`studio-ghost ${
-                entitiesOpen ? "studio-ghost-active" : ""
+              onClick={() => setCompanionOpen((v) => !v)}
+              className={`studio-button ${
+                companionOpen ? "studio-button-primary" : ""
               }`}
             >
-              实体
-              {currentEntities.length > 0 ? ` · ${currentEntities.length}` : ""}
+              AI 伴读
             </button>
           </div>
           <div className="reader-toolbar-group">
+            <BookRating
+              value={bookRating}
+              onChange={onRateBook}
+              size="sm"
+              label="给当前书评分"
+            />
             <span className="studio-chip reader-page-control tabular-nums">
-              第 {activeIdx + 1} / {total} 章
+              {activeIdx + 1} / {total}
             </span>
-            <button
-              onClick={isPagedMode ? goToPrevPage : loadPrev}
-              disabled={
-                loadingPrev ||
-                (isPagedMode
-                  ? activeIdx <= 0 && pageOffset <= 8
-                  : (chapters[0]?.spine_index ?? 0) <= 0)
-              }
-              className="studio-button disabled:opacity-30 disabled:cursor-not-allowed"
-              title={isPagedMode ? "上一页" : "加载上一章"}
-            >
-              {loadingPrev ? "..." : isPagedMode ? "← 上一页" : "↑ 上一章"}
-            </button>
-            {isPagedMode && (
-              <button
-                onClick={goToNextPage}
-                disabled={
-                  loadingMore ||
-                  (activeIdx >= total - 1 && pageOffset >= pageMaxOffset - 8)
-                }
-                className="studio-button disabled:opacity-30 disabled:cursor-not-allowed"
-                title="下一页"
-              >
-                {loadingMore ? "..." : "下一页 →"}
-              </button>
-            )}
-          </div>
-          <div className="reader-toolbar-group">
             <button
               onClick={toggleFullscreen}
               className={`studio-ghost ${
@@ -1042,9 +1024,6 @@ export function EpubView({
               className="studio-ghost"
             >
               设置
-            </button>
-            <button onClick={onBack} className="studio-button">
-              {backLabel}
             </button>
           </div>
         </div>
@@ -1085,6 +1064,7 @@ export function EpubView({
           }`}
         >
           <article
+            onClickCapture={handleReaderLinkClick}
             className={[
               "reading mx-auto py-16",
               // fix: 分页模式 article 不能有横向 padding (列宽必须严格 = container 内容区)
@@ -1121,6 +1101,97 @@ export function EpubView({
             )}
           </article>
         </div>
+        {companionOpen && (
+          <aside className="companion-panel">
+            <div className="companion-panel-head">
+              <div>
+                <h3 className="studio-title text-lg">AI 伴读</h3>
+                <p className="text-xs studio-subtle mt-1">
+                  {currentChapterLabel}
+                </p>
+              </div>
+              <button
+                onClick={() => setCompanionOpen(false)}
+                className="studio-icon-button"
+                aria-label="关闭 AI 伴读"
+              >
+                x
+              </button>
+            </div>
+            <div className="studio-segmented grid-cols-3 mb-4">
+              <button className="studio-segment studio-segment-active">
+                当前章节
+              </button>
+              <button onClick={() => setChatOpen(true)} className="studio-segment">
+                整本书
+              </button>
+              <button onClick={() => setChatOpen(true)} className="studio-segment">
+                全书库
+              </button>
+            </div>
+            <div className="companion-section">
+              <div className="companion-section-title">快速操作</div>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => setChatOpen(true)} className="studio-button">
+                  问 AI
+                </button>
+                <button onClick={addBookmark} className="studio-button">
+                  保存书签
+                </button>
+                <button
+                  onClick={() => setAnnotationsOpen(true)}
+                  className="studio-button"
+                >
+                  标注 {allHighlights.length}
+                </button>
+                <button
+                  onClick={() => setBookmarksOpen(true)}
+                  className="studio-button"
+                >
+                  书签 {bookmarks.length}
+                </button>
+                <button
+                  onClick={() => setEntitiesOpen((v) => !v)}
+                  className="studio-button"
+                >
+                  实体 {currentEntities.length}
+                </button>
+                <button
+                  onClick={() => setMusicSuggestOpen(true)}
+                  className="studio-button"
+                >
+                  AI 配乐
+                </button>
+              </div>
+            </div>
+            <div className="companion-section">
+              <div className="companion-section-title">人物 / 地点</div>
+              {currentEntities.length > 0 ? (
+                <div className="flex flex-wrap gap-2">
+                  {currentEntities.slice(0, 8).map((entity) => (
+                    <button
+                      key={entity.key}
+                      onClick={() => selectEntity(entity)}
+                      className="studio-chip"
+                    >
+                      {entity.name}
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="text-xs studio-subtle leading-relaxed">
+                  提取本章实体后，会在这里显示人物和地点。
+                </p>
+              )}
+            </div>
+            <div className="companion-section">
+              <div className="companion-section-title">阅读辅助</div>
+              <button onClick={onOpenHelp} className="studio-button w-full">
+                使用帮助
+              </button>
+            </div>
+          </aside>
+        )}
         {entitiesOpen && (
           <ChapterEntitiesPanel
             chapterLabel={currentChapterLabel}
@@ -1158,6 +1229,16 @@ export function EpubView({
               ← 上一页
             </button>
           )}
+          {!isPagedMode && (
+            <button
+              onClick={loadPrev}
+              disabled={loadingPrev || (chapters[0]?.spine_index ?? 0) <= 0}
+              className="studio-button px-3 py-0.5 text-xs disabled:opacity-30 disabled:cursor-not-allowed"
+              title="加载上一章"
+            >
+              {loadingPrev ? "..." : "↑ 上一章"}
+            </button>
+          )}
           <span className="text-[10px] studio-subtle tracking-[0.1em] tabular-nums">
             第 {activeIdx + 1} 章 / 共 {total} 章
           </span>
@@ -1187,6 +1268,19 @@ export function EpubView({
           )}
         </div>
       )}
+
+      {pendingSel?.rects.map((rect, idx) => (
+        <div
+          key={`${idx}-${Math.round(rect.left)}-${Math.round(rect.top)}`}
+          className="reader-pending-selection"
+          style={{
+            left: rect.left,
+            top: rect.top,
+            width: rect.width,
+            height: rect.height,
+          }}
+        />
+      ))}
 
       {pendingSel && (
         <div
@@ -1373,6 +1467,45 @@ function htmlToText(html: string): string {
 function cssEscape(value: string): string {
   if (typeof CSS !== "undefined" && CSS.escape) return CSS.escape(value);
   return value.replace(/["\\]/g, "\\$&");
+}
+
+function scrollBookAnchorIntoView(
+  container: HTMLElement | null,
+  rawHref: string | null,
+  isPagedMode: boolean,
+) {
+  if (!container || !rawHref) return;
+  const hashIdx = rawHref.indexOf("#");
+  if (hashIdx < 0) return;
+  const rawId = rawHref.slice(hashIdx + 1);
+  if (!rawId) return;
+
+  let id = rawId;
+  try {
+    id = decodeURIComponent(rawId);
+  } catch {
+    // Keep the raw id; some old ebooks contain non-URL-encoded anchors.
+  }
+
+  const target = container.querySelector(
+    `#${cssEscape(id)}, a[name="${cssEscape(id)}"]`,
+  ) as HTMLElement | null;
+  if (!target) return;
+
+  const containerRect = container.getBoundingClientRect();
+  const targetRect = target.getBoundingClientRect();
+  if (isPagedMode) {
+    container.scrollTo({
+      left: Math.max(0, targetRect.left - containerRect.left + container.scrollLeft - 40),
+      top: 0,
+      behavior: "smooth",
+    });
+  } else {
+    container.scrollTo({
+      top: Math.max(0, targetRect.top - containerRect.top + container.scrollTop - 100),
+      behavior: "smooth",
+    });
+  }
 }
 
 function getPagedStep(root: HTMLElement): number {

@@ -38,6 +38,7 @@ const mockBooks: Book[] = [
     last_read_at: now - 32_000_000,
     cover_path: null,
     read_time_ms: 4_320_000,
+    user_rating: 4,
   },
   {
     id: 2,
@@ -52,6 +53,7 @@ const mockBooks: Book[] = [
     last_read_at: now - 2 * 86_400_000,
     cover_path: null,
     read_time_ms: 5_040_000,
+    user_rating: null,
   },
   {
     id: 3,
@@ -66,6 +68,7 @@ const mockBooks: Book[] = [
     last_read_at: null,
     cover_path: null,
     read_time_ms: 0,
+    user_rating: null,
   },
   {
     id: 4,
@@ -80,6 +83,7 @@ const mockBooks: Book[] = [
     last_read_at: now - 800_000,
     cover_path: null,
     read_time_ms: 1_920_000,
+    user_rating: 5,
   },
   {
     id: 5,
@@ -94,6 +98,7 @@ const mockBooks: Book[] = [
     last_read_at: null,
     cover_path: null,
     read_time_ms: 0,
+    user_rating: null,
   },
 ];
 
@@ -160,6 +165,7 @@ export type Book = {
   last_read_at: number | null;
   cover_path: string | null;
   read_time_ms: number;
+  user_rating: number | null;
 };
 
 export type DoubanMetadata = {
@@ -209,6 +215,14 @@ export type ScanReport = {
   scanned: number;
   added_or_updated: number;
   removed: number;
+};
+
+export type ImportDroppedBooksReport = {
+  received: number;
+  imported: number;
+  skipped_unsupported: number;
+  skipped_duplicate: number;
+  failed: number;
 };
 
 export type EpubPreview = {
@@ -264,10 +278,26 @@ async function mockInvoke<T>(
         added_or_updated: mockBooks.length,
         removed: 0,
       } as T;
+    case "import_dropped_books":
+      return {
+        received: Array.isArray(args?.paths) ? args.paths.length : 0,
+        imported: 0,
+        skipped_unsupported: 0,
+        skipped_duplicate: 0,
+        failed: 0,
+      } as T;
     case "start_library_watcher":
       return false as T;
     case "list_books":
       return mockBooks as T;
+    case "set_book_rating": {
+      const bookId = Number(args?.bookId ?? 0);
+      const rating =
+        args?.rating == null ? null : Math.max(1, Math.min(5, Number(args.rating)));
+      const book = mockBooks.find((b) => b.id === bookId);
+      if (book) book.user_rating = rating;
+      return undefined as T;
+    }
     case "get_douban_metadata":
       return {
         book_id: Number(args?.bookId ?? 1),
@@ -278,6 +308,17 @@ async function mockInvoke<T>(
         /*
           "娴忚鍣ㄩ瑙堢殑璞嗙摚绠€浠嬶紝鐪熷疄搴旂敤涓皢浠庢湰鍦扮紦瀛樿鍙栥€?,
         */
+        douban_url: "https://book.douban.com/",
+        fetched_at: Date.now(),
+        error: null,
+      } as T;
+    case "refresh_douban_book_metadata":
+      return {
+        book_id: Number(args?.bookId ?? 1),
+        status: "ok",
+        rating: "8.7",
+        rating_count: 12345,
+        summary: "Preview Douban summary loaded on demand.",
         douban_url: "https://book.douban.com/",
         fetched_at: Date.now(),
         error: null,
@@ -587,10 +628,16 @@ export const ipc = {
   getLibraryRoot: () => invoke<string | null>("get_library_root"),
   setLibraryRoot: (path: string) => invoke<void>("set_library_root", { path }),
   scanLibrary: () => invoke<ScanReport>("scan_library"),
+  importDroppedBooks: (paths: string[]) =>
+    invoke<ImportDroppedBooksReport>("import_dropped_books", { paths }),
   startLibraryWatcher: () => invoke<boolean>("start_library_watcher"),
   listBooks: () => invoke<Book[]>("list_books"),
+  setBookRating: (bookId: number, rating: number | null) =>
+    invoke<void>("set_book_rating", { bookId, rating }),
   getDoubanMetadata: (bookId: number) =>
     invoke<DoubanMetadata | null>("get_douban_metadata", { bookId }),
+  refreshDoubanBookMetadata: (bookId: number) =>
+    invoke<DoubanMetadata>("refresh_douban_book_metadata", { bookId }),
   refreshDoubanMetadata: (force = false) =>
     invoke<DoubanRefreshReport>("refresh_douban_metadata", { force }),
   removeBook: (bookId: number) => invoke<void>("remove_book", { bookId }),

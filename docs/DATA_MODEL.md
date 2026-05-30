@@ -56,12 +56,14 @@ CREATE TABLE books (
     -- 后续 ALTER 加的列：
     category        TEXT NOT NULL DEFAULT '',    -- 11 个分类之一，'' = 未分类
     cover_path      TEXT,                        -- {appData}/covers/{hash}.{ext}，NULL = 用 placeholder
-    read_time_ms    INTEGER NOT NULL DEFAULT 0   -- 累计阅读时长
+    read_time_ms    INTEGER NOT NULL DEFAULT 0,  -- 累计阅读时长
+    user_rating     INTEGER                      -- 用户个人评分：1..5，NULL = 未评分
 );
 CREATE INDEX idx_books_added_at ON books(added_at DESC);
 ```
 
 > `list_books` 查询时 `LEFT JOIN reading_progress` 取 `MAX(updated_at)` 拼成 `last_read_at`（不入此表）。
+> `user_rating` 是本地个人评分，和 `douban_book_metadata.rating` 分开保存；后者只是外部元数据缓存。
 
 ### `reading_progress` — 续读位置
 
@@ -209,6 +211,7 @@ CREATE INDEX idx_chat_messages_session
 | 事件 | 影响 |
 |---|---|
 | `scan_library` | books 表 upsert；磁盘消失的孤儿删；EPUB 顺手更 cover_path |
+| `set_book_rating` | 写 `books.user_rating`；`NULL` 表示取消评分 |
 | `set_library_root` 切换 | 旧库数据保留，新扫描会形成两套并存（按 file_path 区分） |
 | 删一本书（手动 SQL，UI 暂未提供） | CASCADE 触发：reading_progress / bookmarks / highlights / book_chunks / book_index_status / chat_messages 都被清；covers/ 文件**不自动清**（孤儿） |
 | `ai_index_book` 重索引 | 先 DELETE 该 book_id 下所有 book_chunks 再写入；book_index_status upsert |
@@ -230,6 +233,8 @@ let _ = conn.execute(
     "ALTER TABLE books ADD COLUMN cover_path TEXT", []);
 let _ = conn.execute(
     "ALTER TABLE books ADD COLUMN read_time_ms INTEGER NOT NULL DEFAULT 0", []);
+let _ = conn.execute(
+    "ALTER TABLE books ADD COLUMN user_rating INTEGER", []);
 ```
 
 - 旧库：ALTER 成功，新列就位。

@@ -84,13 +84,27 @@ pub fn failed_metadata(book_id: i64, status: &str) -> DoubanMetadata {
 
 pub(crate) fn find_first_book_subject_url(html: &str) -> Option<String> {
     let re = Regex::new(r#"https?://book\.douban\.com/subject/\d+/?(?:\?[^\s"'<>]*)?"#).ok()?;
-    re.find(html).map(|m| {
-        m.as_str()
-            .split('?')
-            .next()
-            .unwrap_or(m.as_str())
-            .to_string()
-    })
+    if let Some(m) = re.find(html) {
+        return Some(normalize_subject_url(m.as_str()));
+    }
+
+    let link2_re = Regex::new(r#"https?://www\.douban\.com/link2/\?[^"'<>]+"#).ok()?;
+    for m in link2_re.find_iter(html) {
+        let raw = decode_html_entities(m.as_str());
+        let Ok(url) = reqwest::Url::parse(&raw) else {
+            continue;
+        };
+        let Some(target) = url
+            .query_pairs()
+            .find_map(|(k, v)| (k == "url").then(|| v.into_owned()))
+        else {
+            continue;
+        };
+        if re.is_match(&target) {
+            return Some(normalize_subject_url(&target));
+        }
+    }
+    None
 }
 
 pub(crate) fn parse_subject_html(
@@ -100,7 +114,7 @@ pub(crate) fn parse_subject_html(
 ) -> Option<DoubanMetadata> {
     let rating = capture_text(
         html,
-        r#"<span[^>]+class=["'][^"']*rating_num[^"']*["'][^>]*>(?s:(.*?))</span>"#,
+        r#"(?s)<[^>]*class=["'][^"']*rating_num[^"']*["'][^>]*>(.*?)</[^>]+>"#,
     )
     .filter(|s| !s.is_empty());
     let rating_count =
@@ -122,6 +136,15 @@ pub(crate) fn parse_subject_html(
         fetched_at: now_ms(),
         error: None,
     })
+}
+
+fn normalize_subject_url(url: &str) -> String {
+    let base = url.split('?').next().unwrap_or(url);
+    if base.ends_with('/') {
+        base.to_string()
+    } else {
+        format!("{base}/")
+    }
 }
 
 fn extract_summary(html: &str) -> Option<String> {
@@ -150,9 +173,14 @@ fn capture_html(html: &str, pattern: &str) -> Option<String> {
 }
 
 fn html_to_text(html: &str) -> String {
-    let with_breaks = Regex::new(r"(?i)</p>|<br\s*/?>")
-        .map(|re| re.replace_all(html, "\n").into_owned())
+    let without_noise = Regex::new(
+        r"(?is)<script[^>]*>.*?</script>|<style[^>]*>.*?</style>|<noscript[^>]*>.*?</noscript>",
+    )
+        .map(|re| re.replace_all(html, "").into_owned())
         .unwrap_or_else(|_| html.to_string());
+    let with_breaks = Regex::new(r"(?i)</p>|<br\s*/?>")
+        .map(|re| re.replace_all(&without_noise, "\n").into_owned())
+        .unwrap_or(without_noise);
     let no_tags = Regex::new(r"(?s)<[^>]+>")
         .map(|re| re.replace_all(&with_breaks, "").into_owned())
         .unwrap_or(with_breaks);
@@ -200,6 +228,20 @@ mod tests {
     }
 
     #[test]
+    fn parses_book_subject_from_douban_link2_search_html() {
+        let html = r#"
+            <div class="result">
+              <a class="nbg" href="https://www.douban.com/link2/?url=https%3A%2F%2Fbook.douban.com%2Fsubject%2F2567698%2F&amp;query=%E4%B8%89%E4%BD%93&amp;cat_id=1001">Book</a>
+            </div>
+        "#;
+
+        assert_eq!(
+            find_first_book_subject_url(html).as_deref(),
+            Some("https://book.douban.com/subject/2567698/")
+        );
+    }
+
+    #[test]
     fn parses_rating_votes_intro_and_link_from_subject_html() {
         let html = r#"
             <html>
@@ -227,6 +269,46 @@ mod tests {
         assert_eq!(
             meta.douban_url.as_deref(),
             Some("https://book.douban.com/subject/33424487/")
+        );
+    }
+
+    #[test]
+    fn parses_strong_rating_from_current_subject_html() {
+        let html = r#"
+            <html>
+              <strong class="ll rating_num " property="v:average"> 8.9 </strong>
+              <a href="comments" class="rating_people"><span property="v:votes">515613</span>人评价</a>
+              <div class="indent" id="link-report"><div class="intro"><p>简介正文</p></div></div>
+            </html>
+        "#;
+
+        let meta = parse_subject_html(7, "https://book.douban.com/subject/2567698/", html)
+            .expect("metadata should parse");
+
+        assert_eq!(meta.rating.as_deref(), Some("8.9"));
+        assert_eq!(meta.rating_count, Some(515613));
+    }
+
+    #[test]
+    fn summary_ignores_embedded_style_blocks() {
+        let html = r#"
+            <html>
+              <strong class="ll rating_num " property="v:average"> 8.0 </strong>
+              <div id="link-report">
+                <style>.intro p{text-indent:2em;word-break:normal;}</style>
+                <div class="intro">
+                  <p>希望三国演义的故事在中国永远流传。</p>
+                </div>
+              </div>
+            </html>
+        "#;
+
+        let meta = parse_subject_html(8, "https://book.douban.com/subject/1/", html)
+            .expect("metadata should parse");
+
+        assert_eq!(
+            meta.summary.as_deref(),
+            Some("希望三国演义的故事在中国永远流传。")
         );
     }
 }

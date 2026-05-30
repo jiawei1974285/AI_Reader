@@ -87,6 +87,241 @@ body {
     color: var(--color-ink);
   }
 
+  .app-workspace {
+    display: grid;
+    grid-template-columns: 5.5rem minmax(0, 1fr);
+    overflow: hidden;
+  }
+
+  .app-workspace-main {
+    min-width: 0;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  .app-sidebar {
+    display: flex;
+    flex-direction: column;
+    gap: 1rem;
+    border-right: 1px solid var(--color-paper-edge);
+    background:
+      linear-gradient(180deg, color-mix(in srgb, var(--color-paper-soft) 92%, white 8%), var(--color-paper-soft));
+    padding: 0.9rem 0.6rem;
+  }
+
+  .app-sidebar-brand {
+    display: flex;
+    min-height: 3.2rem;
+    align-items: center;
+    justify-content: center;
+    gap: 0.45rem;
+  }
+
+  .app-sidebar-mark {
+    display: grid;
+    width: 2.55rem;
+    height: 2.55rem;
+    place-items: center;
+    overflow: hidden;
+    border: 1px solid color-mix(in srgb, var(--color-paper-edge) 78%, white 22%);
+    border-radius: 10px;
+    background: var(--color-paper);
+    box-shadow: 0 8px 20px rgba(102, 73, 40, 0.08);
+  }
+
+  .app-sidebar-mark img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+  }
+
+  .app-sidebar-title {
+    display: none;
+  }
+
+  .app-sidebar-badge {
+    display: none;
+  }
+
+  .app-sidebar-nav,
+  .app-sidebar-footer {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+  }
+
+  .app-sidebar-nav {
+    flex: 1 1 auto;
+  }
+
+  .app-sidebar-item {
+    display: flex;
+    min-height: 3.1rem;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 0.25rem;
+    border-radius: 8px;
+    color: var(--color-muted);
+    font-size: 0.72rem;
+    line-height: 1;
+    transition: background 140ms ease, color 140ms ease, box-shadow 140ms ease;
+  }
+
+  .app-sidebar-icon {
+    display: grid;
+    width: 1.2rem;
+    height: 1.2rem;
+    place-items: center;
+    line-height: 1;
+  }
+
+  .app-sidebar-icon svg {
+    width: 1.15rem;
+    height: 1.15rem;
+    fill: none;
+    stroke: currentColor;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+    stroke-width: 1.75;
+  }
+
+  .app-sidebar-item:hover,
+  .app-sidebar-item-active {
+    background: color-mix(in srgb, var(--color-accent) 10%, var(--color-paper-soft));
+    color: var(--color-accent);
+  }
+
+  .app-sidebar-item-active {
+    box-shadow: 0 6px 16px rgba(102, 73, 40, 0.08);
+  }
+
+  .global-drawer-backdrop {
+    position: fixed;
+    inset: 0;
+    z-index: 60;
+    display: flex;
+    justify-content: flex-end;
+    background: color-mix(in srgb, var(--color-ink) 12%, transparent);
+  }
+
+  .global-drawer-scrim {
+    flex: 1 1 auto;
+    cursor: default;
+  }
+
+  .global-drawer {
+    display: flex;
+    height: 100%;
+    width: 26rem;
+    max-width: 92vw;
+    flex-direction: column;
+    border-left: 1px solid var(--color-paper-edge);
+    background: var(--color-paper);
+    box-shadow: var(--shadow-panel);
+  }
+
+  .global-drawer-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border-bottom: 1px solid var(--color-paper-edge);
+    padding: 1rem 1.25rem;
+  }
+
+  .global-drawer-search {
+    border-bottom: 1px solid var(--color-paper-edge);
+    padding: 0.75rem 1.25rem;
+  }
+
+  .global-drawer-body {
+    flex: 1 1 auto;
+    overflow: auto;
+    padding: 1rem;
+  }
+
+  .global-bookmark-card {
+    width: 100%;
+    border: 1px solid var(--color-paper-edge);
+    border-radius: 8px;
+    background: var(--color-paper-soft);
+    padding: 0.8rem;
+    text-align: left;
+    transition: border-color 140ms ease, box-shadow 140ms ease, transform 140ms ease;
+  }
+
+  .global-bookmark-card:hover {
+    border-color: color-mix(in srgb, var(--color-accent) 58%, var(--color-paper-edge));
+    box-shadow: 0 6px 18px rgba(102, 73, 40, 0.08);
+    transform: translateY(-1px);
+  }
+
+  .page-shell {
+    display: flex;
+    height: 100%;
+    min-width: 0;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .page-topbar {
+    display: flex;
+    position: relative;
+    z-index: 50;
+    min-height: 5rem;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    border-bottom: 1px solid var(--color-paper-edge);
+    background: color-mix(in srgb, var(--color-paper-soft) 82%, transparent);
+    padding: 1rem 1.35rem;
+    backdrop-filter: blur(14px);
+  }
+
+  .page-topbar-actions {
+    display: flex;
+    min-width: 0;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.55rem;
+  }
+
+  .overflow-menu {
+    position: relative;
+  }
+
+  .overflow-menu-panel {
+    position: absolute;
+    right: 0;
+    top: calc(100% + 0.45rem);
+    z-index: 90;
+    min-width: 13rem;
+    border: 1px solid var(--color-paper-edge);
+    border-radius: 8px;
+    background: color-mix(in srgb, var(--color-paper-soft) 96%, white 4%);
+    box-shadow: var(--shadow-panel);
+    padding: 0.35rem;
+  }
+
+  .overflow-menu-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border-radius: 6px;
+    color: var(--color-ink-soft);
+    font-size: 0.78rem;
+    padding: 0.55rem 0.65rem;
+    text-align: left;
+  }
+
+  .overflow-menu-item:hover {
+    background: color-mix(in srgb, var(--color-paper-edge) 42%, transparent);
+    color: var(--color-ink);
+  }
+
   .studio-header {
     border-bottom: 1px solid var(--color-paper-edge);
     background: color-mix(in srgb, var(--color-paper-soft) 86%, transparent);
@@ -98,6 +333,10 @@ body {
     min-height: 4.25rem;
     padding: 0.7rem 1rem 0.7rem 1.25rem;
     gap: 1rem;
+  }
+
+  .reader-header-quiet {
+    min-height: 4.8rem;
   }
 
   .reader-header-title {
@@ -114,6 +353,89 @@ body {
     min-width: 0;
     overflow-x: auto;
     padding-bottom: 0.05rem;
+  }
+
+  .companion-panel {
+    width: min(24rem, 32vw);
+    min-width: 20rem;
+    border-left: 1px solid var(--color-paper-edge);
+    background: color-mix(in srgb, var(--color-paper-soft) 96%, white 4%);
+    box-shadow: var(--shadow-panel);
+    overflow: auto;
+    padding: 1rem;
+  }
+
+  .companion-panel-head {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    border-bottom: 1px solid var(--color-paper-edge);
+    margin: -0.1rem -0.1rem 1rem;
+    padding: 0.1rem 0.1rem 0.9rem;
+  }
+
+  .companion-section {
+    border-top: 1px solid color-mix(in srgb, var(--color-paper-edge) 72%, transparent);
+    padding-top: 1rem;
+    margin-top: 1rem;
+  }
+
+  .companion-section-title {
+    color: var(--color-muted);
+    font-size: 0.68rem;
+    letter-spacing: 0.16em;
+    margin-bottom: 0.65rem;
+    text-transform: uppercase;
+  }
+
+  .notes-workbench {
+    display: grid;
+    flex: 1 1 auto;
+    min-height: 0;
+    grid-template-columns: 15rem minmax(0, 1fr) 20rem;
+    overflow: hidden;
+  }
+
+  .notes-filter-panel,
+  .notes-inspector {
+    overflow: auto;
+    border-color: var(--color-paper-edge);
+    background: color-mix(in srgb, var(--color-paper-soft) 82%, transparent);
+    padding: 1rem;
+  }
+
+  .notes-filter-panel {
+    border-right-width: 1px;
+  }
+
+  .notes-inspector {
+    border-left-width: 1px;
+  }
+
+  .notes-main-panel {
+    min-width: 0;
+    overflow: auto;
+    padding: 1.5rem 2rem;
+  }
+
+  .notes-filter-item {
+    display: flex;
+    width: 100%;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.75rem;
+    border-radius: 7px;
+    color: var(--color-ink-soft);
+    font-size: 0.78rem;
+    padding: 0.5rem 0.6rem;
+    text-align: left;
+  }
+
+  .notes-filter-item:hover,
+  .notes-filter-item-active {
+    background: color-mix(in srgb, var(--color-accent) 10%, var(--color-paper-soft));
+    color: var(--color-accent);
   }
 
   .reader-toolbar-group {
@@ -620,6 +942,15 @@ article video {
   color: var(--color-ink);
 }
 
+.reader-pending-selection {
+  position: fixed;
+  pointer-events: none;
+  z-index: 45;
+  background: rgba(150, 61, 51, 0.16);
+  border-radius: 2px;
+  box-shadow: 0 0 0 1px rgba(150, 61, 51, 0.08);
+}
+
 /* Highlights: <mark class="ai-hl ai-hl-<color>"> wrapped by the reader's
  * highlight engine after a chapter renders. Use a soft wash that doesn't
  * fight the paper color; box-shadow extends the tint slightly outside the
@@ -707,6 +1038,9 @@ body[data-theme="dark"] .ai-hl-rect-red {
 }
 
 .ai-entity {
+  display: inline;
+  white-space: normal;
+  line-height: inherit;
   cursor: pointer;
   border-radius: 2px;
   text-decoration-line: underline;

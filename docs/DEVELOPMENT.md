@@ -136,7 +136,7 @@ $dbPath = "$env:APPDATA\com.aireader.app\aireader.db"
 # 用 sqlite3 CLI
 sqlite3 "$dbPath"
 sqlite> .schema
-sqlite> SELECT id, title, read_time_ms FROM books;
+sqlite> SELECT id, title, read_time_ms, user_rating FROM books;
 ```
 
 或者用 [DB Browser for SQLite](https://sqlitebrowser.org/) 图形界面。
@@ -226,6 +226,8 @@ let _ = conn.execute(
 旧库升级时第一次成功，之后每次启动报 "duplicate column" 被 `let _ =` 吞掉，无害。
 
 新建表则在 `SCHEMA_SQL` 常量里加 `CREATE TABLE IF NOT EXISTS …`。
+
+例子：书籍评分用 `books.user_rating INTEGER` 保存 1–5 星或 `NULL`，通过 `set_book_rating` IPC 写入；这种轻量字段适合走盲 ALTER，不需要新表。
 
 ### 6.4 新 reader 格式
 

@@ -185,6 +185,7 @@ pub fn import_calibre_library(
             last_read_at: None,
             cover_path: cover_path.clone(),
             read_time_ms: 0,
+            user_rating: None,
         };
 
         if upsert_book(target_conn, &book).is_ok() {
@@ -213,12 +214,7 @@ struct CalibreRow {
 fn parse_best_row(rows: &[CalibreRow]) -> Option<&CalibreRow> {
     rows.iter()
         .filter(|r| r.format.is_some() && r.name.is_some())
-        .filter(|r| {
-            r.format
-                .as_deref()
-                .and_then(format_priority)
-                .is_some()
-        })
+        .filter(|r| r.format.as_deref().and_then(format_priority).is_some())
         .min_by_key(|r| {
             r.format
                 .as_deref()
@@ -244,11 +240,7 @@ mod tests {
 
     #[test]
     fn parse_best_prefers_epub_over_pdf() {
-        let rows = vec![
-            row(1, "PDF", "x"),
-            row(1, "EPUB", "x"),
-            row(1, "MOBI", "x"),
-        ];
+        let rows = vec![row(1, "PDF", "x"), row(1, "EPUB", "x"), row(1, "MOBI", "x")];
         let best = parse_best_row(&rows).unwrap();
         assert_eq!(best.format.as_deref(), Some("EPUB"));
     }

@@ -29,7 +29,6 @@ use aes::Aes128;
 use std::collections::hash_map::DefaultHasher;
 use std::fs;
 use std::hash::{Hash, Hasher};
-use std::io::Read;
 use std::path::{Path, PathBuf};
 
 const NCM_MAGIC: &[u8; 8] = b"CTENFDAM";

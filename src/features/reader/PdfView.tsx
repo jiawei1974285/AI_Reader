@@ -33,6 +33,7 @@ import { ChatPanel } from "./ChatPanel";
 import { captureSelection } from "./highlight";
 import { BookSearch } from "./BookSearch";
 import { BookmarksPanel } from "./BookmarksPanel";
+import { BookRating } from "@/features/library/BookRating";
 
 // Bundle the pdf.js worker via Vite's URL resolution so it ships with the app
 // in both dev and production builds.
@@ -46,6 +47,9 @@ type Props = {
   bookId: number;
   aiSettings: AiSettings;
   onOpenAiSettings: () => void;
+  onOpenHelp: () => void;
+  bookRating?: number | null;
+  onRateBook: (rating: number | null) => void;
   onBack: () => void;
   backLabel?: string;
   initialSpine?: number;
@@ -84,6 +88,9 @@ export function PdfView({
   bookId,
   aiSettings,
   onOpenAiSettings,
+  onOpenHelp,
+  bookRating,
+  onRateBook,
   onBack,
   backLabel = "返回书架",
   initialSpine,
@@ -112,6 +119,7 @@ export function PdfView({
   const [bookmarks, setBookmarks] = useState<Bookmark[]>([]);
   const [bookmarksLoading, setBookmarksLoading] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
+  const [companionOpen, setCompanionOpen] = useState(false);
   const [bookmarkStatus, setBookmarkStatus] = useState<string | null>(null);
 
   // Ctrl/Cmd+F opens the in-book search bar (current page only; pdf.js
@@ -233,7 +241,7 @@ export function PdfView({
 
   // pdf.js needs CMap tables for CJK PDFs that don't embed fonts, and
   // standard_fonts as a fallback. We copy these from pdfjs-dist into the
-  // bundle via vite-plugin-static-copy and reference them here. Must be
+  // copy with scripts/copy-pdfjs-assets.mjs and reference them here. Must be
   // memoized; react-pdf reloads the document if `options` identity
   // changes.
   const pdfOptions = useMemo(
@@ -824,7 +832,7 @@ export function PdfView({
 
   return (
     <div className="app-frame relative flex flex-col">
-      <header className="studio-header reader-header flex items-center justify-between">
+      <header className="studio-header reader-header reader-header-quiet flex items-center justify-between">
         <div className="reader-header-title min-w-0">
           <h2 className="studio-title text-lg leading-tight truncate">
             {fileName}
@@ -835,6 +843,9 @@ export function PdfView({
         </div>
         <div className="reader-toolbar text-xs">
           <div className="reader-toolbar-group">
+            <button onClick={onBack} className="studio-ghost">
+              {backLabel}
+            </button>
             <button
               onClick={() =>
                 setSettings((s) => ({
@@ -849,63 +860,42 @@ export function PdfView({
               目录
             </button>
             <button
-              onClick={() => setAnnotationsOpen(true)}
-              className="studio-ghost"
-            >
-              标注{allHighlights.length > 0 ? ` · ${allHighlights.length}` : ""}
-            </button>
-            <button
-              onClick={addBookmark}
-              className="studio-ghost"
-              title="保存当前阅读位置"
-            >
-              书签
-            </button>
-            <button
-              onClick={() => setBookmarksOpen(true)}
-              className={`studio-ghost ${
-                bookmarksOpen ? "studio-ghost-active" : ""
-              }`}
-              title="查看当前书的书签"
-            >
-              书签列表{bookmarks.length > 0 ? ` · ${bookmarks.length}` : ""}
-            </button>
-            <button
               onClick={() => setSearchOpen(true)}
               className="studio-ghost"
               title="本页内查找 (Ctrl+F)"
             >
               查找
             </button>
+            <button
+              onClick={() => setBookmarksOpen(true)}
+              className={`studio-ghost ${
+                bookmarksOpen ? "studio-ghost-active" : ""
+              }`}
+              title="书签列表"
+            >
+              书签{bookmarks.length > 0 ? ` ${bookmarks.length}` : ""}
+            </button>
             <button onClick={() => setChatOpen(true)} className="studio-ghost">
               问 AI
             </button>
             <button
-              onClick={() => {
-                const tl = pageWrapRef.current?.querySelector(
-                  ".react-pdf__Page__textContent",
-                );
-                setMusicChapterText(
-                  textMode ? pageText : (tl?.textContent ?? ""),
-                );
-                setMusicSuggestOpen(true);
-              }}
-              className="studio-ghost"
+              onClick={() => setCompanionOpen((v) => !v)}
+              className={`studio-button ${
+                companionOpen ? "studio-button-primary" : ""
+              }`}
             >
-              AI 配乐
+              AI 伴读
             </button>
           </div>
           <div className="reader-toolbar-group">
-            <button
-              onClick={() => goTo(pageNum - 1)}
-              disabled={pageNum <= 1}
-              aria-label="上一页"
-              className="studio-icon-button disabled:opacity-25 disabled:cursor-not-allowed"
-            >
-              ↑
-            </button>
+            <BookRating
+              value={bookRating}
+              onChange={onRateBook}
+              size="sm"
+              label="给当前书评分"
+            />
             <span className="studio-chip reader-page-control tabular-nums">
-              第
+              页
               <input
                 type="text"
                 inputMode="numeric"
@@ -922,18 +912,8 @@ export function PdfView({
                 }}
                 className="reader-page-input mx-1 tabular-nums"
               />
-              / {numPages || "-"} 页
+              / {numPages || "-"}
             </span>
-            <button
-              onClick={() => goTo(pageNum + 1)}
-              disabled={pageNum >= numPages}
-              aria-label="下一页"
-              className="studio-icon-button disabled:opacity-25 disabled:cursor-not-allowed"
-            >
-              ↓
-            </button>
-          </div>
-          <div className="reader-toolbar-group">
             <button
               onClick={() => setTextMode((v) => !v)}
               className={`studio-ghost ${textMode ? "studio-ghost-active" : ""}`}
@@ -984,8 +964,6 @@ export function PdfView({
             >
               整页
             </button>
-          </div>
-          <div className="reader-toolbar-group">
             <button
               onClick={toggleFullscreen}
               className={`studio-ghost ${fullscreen ? "studio-ghost-active" : ""}`}
@@ -998,9 +976,6 @@ export function PdfView({
               className="studio-ghost"
             >
               设置
-            </button>
-            <button onClick={onBack} className="studio-button">
-              {backLabel}
             </button>
           </div>
         </div>
@@ -1109,6 +1084,95 @@ export function PdfView({
             )}
           </Document>
         </div>
+        {companionOpen && (
+          <aside className="companion-panel">
+            <div className="companion-panel-head">
+              <div>
+                <h3 className="studio-title text-lg">AI 伴读</h3>
+                <p className="text-xs studio-subtle mt-1">
+                  第 {pageNum} 页 / 共 {numPages || "-"} 页
+                </p>
+              </div>
+              <button
+                onClick={() => setCompanionOpen(false)}
+                className="studio-icon-button"
+                aria-label="关闭 AI 伴读"
+              >
+                x
+              </button>
+            </div>
+            <div className="studio-segmented grid-cols-3 mb-4">
+              <button className="studio-segment studio-segment-active">
+                当前页
+              </button>
+              <button onClick={() => setChatOpen(true)} className="studio-segment">
+                整本书
+              </button>
+              <button onClick={() => setChatOpen(true)} className="studio-segment">
+                全书库
+              </button>
+            </div>
+            <div className="companion-section">
+              <div className="companion-section-title">快速操作</div>
+              <div className="grid grid-cols-2 gap-2">
+                <button onClick={() => setChatOpen(true)} className="studio-button">
+                  问 AI
+                </button>
+                <button onClick={addBookmark} className="studio-button">
+                  保存书签
+                </button>
+                <button
+                  onClick={() => setAnnotationsOpen(true)}
+                  className="studio-button"
+                >
+                  标注 {allHighlights.length}
+                </button>
+                <button
+                  onClick={() => setBookmarksOpen(true)}
+                  className="studio-button"
+                >
+                  书签 {bookmarks.length}
+                </button>
+                <button
+                  onClick={() => {
+                    const tl = pageWrapRef.current?.querySelector(
+                      ".react-pdf__Page__textContent",
+                    );
+                    setMusicChapterText(
+                      textMode ? pageText : (tl?.textContent ?? ""),
+                    );
+                    setMusicSuggestOpen(true);
+                  }}
+                  className="studio-button"
+                >
+                  AI 配乐
+                </button>
+                <button onClick={onOpenHelp} className="studio-button">
+                  使用帮助
+                </button>
+              </div>
+            </div>
+            <div className="companion-section">
+              <div className="companion-section-title">页面工具</div>
+              <div className="grid grid-cols-2 gap-2">
+                <button
+                  onClick={() => goTo(pageNum - 1)}
+                  disabled={pageNum <= 1}
+                  className="studio-button disabled:opacity-30"
+                >
+                  上一页
+                </button>
+                <button
+                  onClick={() => goTo(pageNum + 1)}
+                  disabled={pageNum >= numPages}
+                  className="studio-button disabled:opacity-30"
+                >
+                  下一页
+                </button>
+              </div>
+            </div>
+          </aside>
+        )}
       </div>
 
       {/* Page progress strip matching EpubView's chapter strip. */}

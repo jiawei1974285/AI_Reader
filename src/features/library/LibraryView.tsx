@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 import { open as openDialog } from "@tauri-apps/plugin-dialog";
+import { getCurrentWindow } from "@tauri-apps/api/window";
 import {
   ipc,
   isTauriRuntime,
@@ -10,9 +11,9 @@ import {
   type ClassifyProgress,
 } from "@/lib/ipc";
 import { BookCard } from "./BookCard";
-import { RecommendPanel } from "./RecommendPanel";
 
 type SortKey = "added_desc" | "read_desc" | "title_asc" | "author_asc";
+type DropState = "idle" | "over" | "importing";
 
 const SORT_OPTIONS: { value: SortKey; label: string }[] = [
   { value: "added_desc", label: "最近添加" },
@@ -63,7 +64,9 @@ type Props = {
   onOpenNotes: () => void;
   onOpenMusic: () => void;
   onOpenStats: () => void;
+  onOpenRecommend: () => void;
   onOpenAiSettings: () => void;
+  onOpenHelp: () => void;
 };
 
 export function LibraryView({
@@ -71,7 +74,9 @@ export function LibraryView({
   onOpenNotes,
   onOpenMusic,
   onOpenStats,
+  onOpenRecommend,
   onOpenAiSettings,
+  onOpenHelp,
 }: Props) {
   const [root, setRoot] = useState<string | null>(null);
   const [books, setBooks] = useState<Book[]>([]);
@@ -80,8 +85,9 @@ export function LibraryView({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [lastReport, setLastReport] = useState<string | null>(null);
-  const [recommendOpen, setRecommendOpen] = useState(false);
   const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const [dropState, setDropState] = useState<DropState>("idle");
   const [bookmarkQuery, setBookmarkQuery] = useState("");
   // B4: multi-select tag filter. Default UX is single-select (chip click
   // replaces selection); shift+click adds/removes from the set (OR
@@ -252,6 +258,32 @@ export function LibraryView({
     };
   }, []);
 
+  useEffect(() => {
+    if (!isTauriRuntime() || !root) return;
+    let unlisten: UnlistenFn | null = null;
+    getCurrentWindow()
+      .onDragDropEvent(async (event) => {
+        const payload = event.payload;
+        if (payload.type === "enter" || payload.type === "over") {
+          setDropState((prev) => (prev === "importing" ? prev : "over"));
+          return;
+        }
+        if (payload.type === "leave") {
+          setDropState((prev) => (prev === "importing" ? prev : "idle"));
+          return;
+        }
+        if (payload.type === "drop") {
+          await importDraggedPaths(payload.paths);
+        }
+      })
+      .then((fn) => {
+        unlisten = fn;
+      });
+    return () => {
+      if (unlisten) unlisten();
+    };
+  }, [root]);
+
   async function pickRoot() {
     setError(null);
     let selected = "浏览器预览书库";
@@ -302,6 +334,37 @@ export function LibraryView({
     }
   }
 
+  async function importDraggedPaths(paths: string[]) {
+    if (!paths.length) {
+      setDropState("idle");
+      return;
+    }
+    setDropState("importing");
+    setScanning(true);
+    setError(null);
+    try {
+      const report = await ipc.importDroppedBooks(paths);
+      const parts = [
+        `拖入 ${report.received}`,
+        `导入 ${report.imported}`,
+      ];
+      if (report.skipped_unsupported > 0)
+        parts.push(`跳过不支持 ${report.skipped_unsupported}`);
+      if (report.skipped_duplicate > 0)
+        parts.push(`已在书库 ${report.skipped_duplicate}`);
+      if (report.failed > 0) parts.push(`失败 ${report.failed}`);
+      setLastReport(parts.join(" · "));
+      setBooks(await ipc.listBooks());
+      setBookmarks(await ipc.listRecentBookmarks(500));
+      await refreshTagsMap();
+    } catch (e) {
+      setError(`拖入书籍失败：${String(e)}`);
+    } finally {
+      setScanning(false);
+      setDropState("idle");
+    }
+  }
+
   async function rescan() {
     setScanning(true);
     setError(null);
@@ -344,7 +407,26 @@ export function LibraryView({
     }
   }
 
-  const { displayedBooks, categoryCounts, formatCounts, totalsAfterSearch } =
+  async function setBookRating(bookId: number, rating: number | null) {
+    setBooks((prev) =>
+      prev.map((book) =>
+        book.id === bookId ? { ...book, user_rating: rating } : book,
+      ),
+    );
+    try {
+      await ipc.setBookRating(bookId, rating);
+    } catch (e) {
+      setError(String(e));
+      setBooks(await ipc.listBooks());
+    }
+  }
+
+  const {
+    displayedBooks,
+    categoryCounts,
+    formatCounts,
+    totalsAfterSearch,
+  } =
     useMemo(() => {
       // First apply the search filter (shared across both facets), so counts
       // shown on each facet's chip reflect "matches if I click this".
@@ -432,7 +514,14 @@ export function LibraryView({
         formatCounts: fmtCounts,
         totalsAfterSearch: searched.length,
       };
-    }, [books, activeCategories, activeFormat, searchQuery, sortKey, tagsByBook]);
+    }, [
+      books,
+      activeCategories,
+      activeFormat,
+      searchQuery,
+      sortKey,
+      tagsByBook,
+    ]);
 
   const orderedCategories = useMemo(() => {
     const out: string[] = [];
@@ -496,6 +585,7 @@ export function LibraryView({
         last_read_at: bookmark.created_at,
         cover_path: null,
         read_time_ms: 0,
+        user_rating: null,
       } satisfies Book);
     setBookmarksOpen(false);
     onOpenBook(book, bookmark.spine_index, bookmark.scroll_y);
@@ -532,11 +622,11 @@ export function LibraryView({
   }
 
   return (
-    <div className="app-frame relative flex flex-col">
-      <header className="studio-header px-6 py-4 flex items-center justify-between gap-4">
+    <div className="page-shell relative">
+      <header className="page-topbar">
         <div className="min-w-0">
           <div className="flex items-center gap-3">
-            <h1 className="studio-title text-2xl leading-tight">AIreader</h1>
+            <h1 className="studio-title text-2xl leading-tight">书架</h1>
             <span className="px-2 py-1 rounded border border-[var(--color-accent)]/30 text-[10px] text-[var(--color-accent)]">
               本地优先
             </span>
@@ -549,13 +639,13 @@ export function LibraryView({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 text-xs flex-shrink-0">
+        <div className="page-topbar-actions text-xs flex-shrink-0">
           <input
             type="search"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
             placeholder="搜索书名、作者、标签"
-            className="studio-input text-sm w-56"
+            className="studio-input text-sm w-72 max-w-[30vw]"
           />
           <select
             value={sortKey}
@@ -570,38 +660,6 @@ export function LibraryView({
             ))}
           </select>
           <button
-            onClick={() => setRecommendOpen(true)}
-            className="studio-button"
-          >
-            推荐
-          </button>
-          <button
-            onClick={() => setBookmarksOpen(true)}
-            className="studio-button"
-            title="查看已保存的阅读书签"
-          >
-            书签{bookmarks.length > 0 ? ` · ${bookmarks.length}` : ""}
-          </button>
-          <button onClick={onOpenNotes} className="studio-button">
-            笔记
-          </button>
-          <button onClick={onOpenMusic} className="studio-button">
-            音乐
-          </button>
-          <button onClick={onOpenStats} className="studio-button">
-            统计
-          </button>
-          <button onClick={onOpenAiSettings} className="studio-button">
-            AI 设置
-          </button>
-          <button
-            onClick={rescan}
-            disabled={scanning}
-            className="studio-button"
-          >
-            {scanning ? "扫描中" : "重新扫描"}
-          </button>
-          <button
             onClick={classify}
             disabled={classifying || books.length === 0}
             className="studio-button studio-button-primary"
@@ -614,18 +672,130 @@ export function LibraryView({
               : "AI 整理"}
           </button>
           <button onClick={pickRoot} className="studio-button">
-            换目录
+            导入书籍
           </button>
-          <button
-            onClick={importFromCalibre}
-            disabled={scanning}
-            className="studio-button"
-            title="选 Calibre 库目录（含 metadata.db）一键导入"
-          >
-            从 Calibre 导入
-          </button>
+          <div className="overflow-menu">
+            <button
+              type="button"
+              onClick={() => setMoreOpen((v) => !v)}
+              className="studio-icon-button"
+              aria-label="更多书架操作"
+            >
+              ⋯
+            </button>
+            {moreOpen && (
+              <div className="overflow-menu-panel">
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenRecommend();
+                    setMoreOpen(false);
+                  }}
+                  className="overflow-menu-item"
+                >
+                  推荐
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setBookmarksOpen(true);
+                    setMoreOpen(false);
+                  }}
+                  className="overflow-menu-item"
+                >
+                  <span>书签</span>
+                  {bookmarks.length > 0 && <span>{bookmarks.length}</span>}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    rescan();
+                    setMoreOpen(false);
+                  }}
+                  disabled={scanning}
+                  className="overflow-menu-item disabled:opacity-50"
+                >
+                  {scanning ? "扫描中" : "重新扫描"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    importFromCalibre();
+                    setMoreOpen(false);
+                  }}
+                  disabled={scanning}
+                  className="overflow-menu-item disabled:opacity-50"
+                >
+                  从 Calibre 导入
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenAiSettings();
+                    setMoreOpen(false);
+                  }}
+                  className="overflow-menu-item"
+                >
+                  AI 设置
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenHelp();
+                    setMoreOpen(false);
+                  }}
+                  className="overflow-menu-item"
+                >
+                  使用帮助
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenNotes();
+                    setMoreOpen(false);
+                  }}
+                  className="overflow-menu-item"
+                >
+                  打开笔记
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenMusic();
+                    setMoreOpen(false);
+                  }}
+                  className="overflow-menu-item"
+                >
+                  打开音乐
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    onOpenStats();
+                    setMoreOpen(false);
+                  }}
+                  className="overflow-menu-item"
+                >
+                  阅读统计
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       </header>
+
+      {dropState !== "idle" && (
+        <div className="absolute inset-0 z-50 flex items-center justify-center bg-[var(--color-ink)]/18 backdrop-blur-[2px]">
+          <div className="rounded-md border border-[var(--color-accent)]/45 bg-[var(--color-paper)] px-8 py-6 text-center shadow-2xl">
+            <div className="studio-title text-xl">
+              {dropState === "importing" ? "正在导入书籍..." : "松手导入到当前书库"}
+            </div>
+            <p className="mt-2 text-sm studio-subtle">
+              支持 EPUB / PDF / TXT / DOCX / MOBI / AZW / AZW3，会复制到当前书库目录后刷新书架。
+            </p>
+          </div>
+        </div>
+      )}
 
       {recentBooks.length > 0 && (
         <div className="px-6 py-3 border-b border-[var(--color-paper-edge)] bg-[var(--color-paper)]/30">
@@ -744,7 +914,7 @@ export function LibraryView({
           <div className="studio-panel text-center py-16 text-sm studio-subtle">
             这个目录里还没有可阅读的书籍。
             <br />
-            放入 EPUB / PDF / TXT / DOCX / MOBI 后重新扫描。
+            可以直接把 EPUB / PDF / TXT / DOCX / MOBI 拖进书架。
           </div>
         )}
         <div className="grid grid-cols-[repeat(auto-fill,minmax(156px,1fr))] gap-4">
@@ -761,20 +931,11 @@ export function LibraryView({
                   setError(String(e));
                 }
               }}
+              onRate={(rating) => setBookRating(b.id, rating)}
             />
           ))}
         </div>
       </main>
-
-      {recommendOpen && (
-        <RecommendPanel
-          onOpenBook={(book) => {
-            setRecommendOpen(false);
-            onOpenBook(book);
-          }}
-          onClose={() => setRecommendOpen(false)}
-        />
-      )}
 
       {bookmarksOpen && (
         <div className="absolute inset-0 z-40 flex justify-end bg-[var(--color-ink)]/12">

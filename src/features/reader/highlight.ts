@@ -16,6 +16,7 @@ export function captureSelection(
   prefix: string;
   suffix: string;
   rect: DOMRect;
+  rects: DOMRect[];
 } | null {
   const sel = window.getSelection();
   if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null;
@@ -48,6 +49,9 @@ export function captureSelection(
     prefix,
     suffix,
     rect: range.getBoundingClientRect(),
+    rects: Array.from(range.getClientRects()).filter(
+      (rect) => rect.width > 0 && rect.height > 0,
+    ),
   };
 }
 

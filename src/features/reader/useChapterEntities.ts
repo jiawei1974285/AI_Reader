@@ -57,7 +57,9 @@ export function useChapterEntities({
     const root = scrollRef.current;
     if (!root) return;
     function onClick(e: Event) {
-      const target = e.target as HTMLElement;
+      const target = eventElement(e.target);
+      if (!target) return;
+      if (target.closest("mark.ai-hl")) return;
       const span = target.closest(".ai-entity") as HTMLElement | null;
       if (!span) return;
       e.preventDefault();
@@ -116,4 +118,10 @@ export function useChapterEntities({
     setActiveEntityKey,
     fetchEntitiesForCurrentChapter,
   };
+}
+
+function eventElement(target: EventTarget | null): HTMLElement | null {
+  if (target instanceof HTMLElement) return target;
+  if (target instanceof Node) return target.parentElement;
+  return null;
 }

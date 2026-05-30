@@ -95,6 +95,7 @@ pub fn scan(
             last_read_at: None,
             cover_path: None,
             read_time_ms: 0,
+            user_rating: None,
         };
 
         let path_for_cover = book.file_path.clone();

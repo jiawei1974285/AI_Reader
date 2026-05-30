@@ -218,6 +218,17 @@ impl Mobi {
             ..self.metadata.mobi.first_non_book_index as usize
     }
 
+    /// Returns the PalmDOC text records range. In MOBI/KF8 files, record 0 is
+    /// the PalmDOC/MOBI header and the next `record_count` records are the
+    /// compressed text stream. Later records may be indices, skeleton/flow
+    /// tables, resources, images, or Huff/CDIC dictionaries; feeding those into
+    /// the text decompressor corrupts Huff dictionary state.
+    fn text_records_range(&self) -> Range<usize> {
+        let start = 1usize;
+        let end = start.saturating_add(self.metadata.palmdoc.record_count as usize);
+        start..end
+    }
+
     /// Returns raw records that contain compressed, encrypted and encoded content slices.
     pub fn raw_records(&self) -> RawRecords {
         self.metadata.records.parse(&self.content)
@@ -245,7 +256,7 @@ impl Mobi {
         let encoding = self.text_encoding();
         let mut all_bytes: Vec<u8> = Vec::new();
         let mut n = 0usize;
-        for record in self.raw_records().range(self.readable_records_range()).iter() {
+        for record in self.raw_records().range(self.text_records_range()).iter() {
             let dec = record.decompress_palmdoc();
             all_bytes.extend_from_slice(&dec.0);
             n += 1;
@@ -266,7 +277,7 @@ impl Mobi {
         // [AIreader patch] Same cross-record fix as palmdoc_string_lossy.
         let encoding = self.text_encoding();
         let mut all_bytes: Vec<u8> = Vec::new();
-        for record in self.raw_records().range(self.readable_records_range()).iter() {
+        for record in self.raw_records().range(self.text_records_range()).iter() {
             let dec = record.decompress_palmdoc();
             all_bytes.extend_from_slice(&dec.0);
         }
@@ -277,7 +288,7 @@ impl Mobi {
         // [AIreader patch] Same cross-record fix.
         let encoding = self.text_encoding();
         let mut all_bytes: Vec<u8> = Vec::new();
-        for r in self.raw_records().range(self.readable_records_range()).iter() {
+        for r in self.raw_records().range(self.text_records_range()).iter() {
             all_bytes.extend_from_slice(r.content);
         }
         record::content_to_string_lossy(&all_bytes, encoding)
@@ -287,7 +298,7 @@ impl Mobi {
         // [AIreader patch] Same cross-record fix.
         let encoding = self.text_encoding();
         let mut all_bytes: Vec<u8> = Vec::new();
-        for r in self.raw_records().range(self.readable_records_range()).iter() {
+        for r in self.raw_records().range(self.text_records_range()).iter() {
             all_bytes.extend_from_slice(r.content);
         }
         Ok(record::content_to_string(&all_bytes, encoding)?)
@@ -315,7 +326,7 @@ impl Mobi {
         // 不 trim 直接喂 Huff 解码会跑过末尾 → EOF / 错 codeword → 解码失败.
         let flags = self.metadata.mobi.extra_record_data_flags;
         let trimmed: Vec<Vec<u8>> = records
-            .range(self.readable_records_range())
+            .range(self.text_records_range())
             .iter()
             .map(|record| trim_record_trailer_kindle(record.content, flags))
             .collect();
@@ -394,7 +405,7 @@ impl Mobi {
         match self.compression() {
             Compression::No => {
                 let mut all = Vec::new();
-                for r in self.raw_records().range(self.readable_records_range()).iter() {
+                for r in self.raw_records().range(self.text_records_range()).iter() {
                     all.extend_from_slice(r.content);
                 }
                 all
@@ -407,7 +418,7 @@ impl Mobi {
                 // at the start of each record point back into the previous
                 // record's tail).
                 let mut all = Vec::new();
-                for r in self.raw_records().range(self.readable_records_range()).iter() {
+                for r in self.raw_records().range(self.text_records_range()).iter() {
                     r.decompress_palmdoc_into(&mut all);
                 }
                 all

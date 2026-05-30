@@ -1,7 +1,7 @@
 {
   "name": "aireader",
   "private": true,
-  "version": "0.2.4",
+  "version": "0.3.4",
   "type": "module",
   "scripts": {
     "copy-pdfjs-assets": "node ./scripts/copy-pdfjs-assets.mjs",
@@ -30,7 +30,6 @@
     "@vitejs/plugin-react": "^4.6.0",
     "tailwindcss": "^4.3.0",
     "typescript": "~5.8.3",
-    "vite": "^7.0.4",
-    "vite-plugin-static-copy": "^4.1.0"
+    "vite": "^7.0.4"
   }
 }

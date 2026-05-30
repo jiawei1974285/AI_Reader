@@ -163,7 +163,6 @@ impl PdbRecords {
     /// Parses content returing raw records that contain slices of content based on their offset.
     pub(crate) fn parse<'a>(&self, content: &'a [u8]) -> RawRecords<'a> {
         let mut crecords = RawRecords::default();
-        let extra_bytes = self.extra_bytes as usize;
         let mut records = self.records.iter().peekable();
 
         while let Some(record) = records.next() {
@@ -171,15 +170,13 @@ impl PdbRecords {
             let content = if let Some(next) = records.peek() {
                 let next_offset = next.offset as usize;
 
-                // [AIreader patch] Original code was:
-                //   if extra_bytes < next_offset {
-                //       &content[curr_offset..(next_offset - extra_bytes)]
-                //   } else { &[] }
-                // This panics when curr_offset > (next_offset - extra_bytes),
-                // which happens on some real-world MOBI files (e.g. KF8
-                // hybrids with non-monotonic record offsets). Clamp end to
-                // content.len() and skip reversed slices.
-                let end = next_offset.saturating_sub(extra_bytes).min(content.len());
+                // PDB section content runs from this record's offset to the
+                // next record's offset. The two bytes after the PDB record
+                // table are not per-section trailer bytes; subtracting them
+                // from every section truncates compressed Huff/PalmDOC streams
+                // and corrupts real KF8/AZW3 text. Format-specific trailers
+                // are trimmed later from MOBI extra_data_flags.
+                let end = next_offset.min(content.len());
                 let start = curr_offset.min(content.len());
                 if start <= end {
                     &content[start..end]

@@ -84,6 +84,23 @@ function rangeIntersectsEntity(range: Range): boolean {
     }
     node = node.parentNode;
   }
+  const root =
+    range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+      ? range.commonAncestorContainer.parentNode
+      : range.commonAncestorContainer;
+  if (root) {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+    let curr: Node | null;
+    while ((curr = walker.nextNode())) {
+      if (
+        curr instanceof HTMLElement &&
+        curr.classList.contains("ai-entity") &&
+        range.intersectsNode(curr)
+      ) {
+        return true;
+      }
+    }
+  }
   return false;
 }
 
@@ -99,9 +116,48 @@ function wrapRange(range: Range, entity: EntityWithKey, active: boolean) {
   try {
     range.surroundContents(span);
   } catch {
-    const fragment = range.extractContents();
-    span.appendChild(fragment);
-    range.insertNode(span);
+    wrapTextNodesPiecewise(range, entity, active);
+  }
+}
+
+function wrapTextNodesPiecewise(range: Range, entity: EntityWithKey, active: boolean) {
+  const root =
+    range.commonAncestorContainer.nodeType === Node.TEXT_NODE
+      ? range.commonAncestorContainer.parentNode
+      : range.commonAncestorContainer;
+  if (!root) return;
+
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  const pieces: Array<{ node: Text; start: number; end: number }> = [];
+  let curr: Node | null;
+  while ((curr = walker.nextNode())) {
+    if (!range.intersectsNode(curr)) continue;
+    const node = curr as Text;
+    let start = 0;
+    let end = node.length;
+    if (node === range.startContainer) start = range.startOffset;
+    if (node === range.endContainer) end = range.endOffset;
+    if (start < end) pieces.push({ node, start, end });
+  }
+
+  for (let i = pieces.length - 1; i >= 0; i--) {
+    const { node, start, end } = pieces[i];
+    const r = document.createRange();
+    try {
+      r.setStart(node, start);
+      r.setEnd(node, end);
+      const span = document.createElement("span");
+      span.className = `ai-entity ai-entity-${entity.kind === "person" ? "person" : "place"}${
+        active ? " ai-entity-active" : ""
+      }`;
+      span.dataset.entityKey = entity.key;
+      span.dataset.entityName = entity.name;
+      span.dataset.entityKind = entity.kind;
+      span.title = entity.summary;
+      r.surroundContents(span);
+    } catch {
+      // Keep the original book DOM intact if a pathological text node refuses wrapping.
+    }
   }
 }
 

@@ -17,8 +17,10 @@
 | `get_library_root` | — | `Option<String>` | 取已设置的书库根目录 |
 | `set_library_root` | `path: String` | `()` | 设置 / 切换书库根 |
 | `scan_library` | — | `ScanReport` | 全量扫描，返回 `{ scanned, added_or_updated, removed }` |
+| `import_dropped_books` | `paths: Vec<String>` | `ImportDroppedBooksReport` | 拖入书籍后复制到当前书库并扫描 |
 | `start_library_watcher` | — | `bool` | 启动/重启文件监听；`true` 表示已激活，`false` 表示没有 library_root |
-| `list_books` | — | `Vec<Book>` | 列出书库所有书（含 `last_read_at` LEFT JOIN） |
+| `list_books` | — | `Vec<Book>` | 列出书库所有书（含 `last_read_at` LEFT JOIN 和 `user_rating`） |
+| `set_book_rating` | `bookId, rating: i64/null` | `()` | 设置 1–5 星个人评分；`null` 清空评分 |
 | `get_book_by_path` | `path: String` | `Option<Book>` | 按绝对路径查 |
 
 ### 阅读 / 进度
@@ -169,6 +171,7 @@ type Book = {
   last_read_at: number | null;
   cover_path: string | null;
   read_time_ms: number;
+  user_rating: number | null;
 };
 ```
 

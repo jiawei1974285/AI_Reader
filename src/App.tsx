@@ -17,6 +17,10 @@ import { GlobalAiSettingsPanel } from "@/features/settings/GlobalAiSettingsPanel
 import { CommandPalette } from "@/features/command-palette/CommandPalette";
 import { useCommandPalette } from "@/features/command-palette/useCommandPalette";
 import { FullTextSearch } from "@/features/search/FullTextSearch";
+import { HelpPanel } from "@/features/help/HelpPanel";
+import { AppSidebar } from "@/components/shell/AppSidebar";
+import { GlobalBookmarksPanel } from "@/features/bookmarks/GlobalBookmarksPanel";
+import { RecommendPanel } from "@/features/library/RecommendPanel";
 import type { AiSettings, Book } from "@/lib/ipc";
 
 type View =
@@ -33,6 +37,8 @@ type View =
       returnTo: "library" | "notes" | "stats";
     };
 
+type AppSection = "library" | "notes" | "music" | "stats";
+
 function App() {
   return (
     <MusicPlayerProvider>
@@ -47,6 +53,10 @@ function AppShell() {
   const [aiSettings, setAiSettings] = useState<AiSettings>(DEFAULT_AI_SETTINGS);
   const [aiSettingsLoaded, setAiSettingsLoaded] = useState(false);
   const [aiSettingsOpen, setAiSettingsOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const [bookmarksOpen, setBookmarksOpen] = useState(false);
+  const [recommendOpen, setRecommendOpen] = useState(false);
+  const [doubanRefreshText, setDoubanRefreshText] = useState<string | null>(null);
   // C6: 全局命令面板 (Ctrl/Cmd+K)
   const { open: paletteOpen, setOpen: setPaletteOpen } = useCommandPalette();
   // C1: 全文 FTS 检索面板（命令面板 / library 按钮 都能触发）
@@ -60,7 +70,15 @@ function AppShell() {
   }, []);
 
   useEffect(() => {
-    ipc.refreshDoubanMetadata(false).catch(() => {});
+    ipc
+      .refreshDoubanMetadata(false)
+      .then((report) => {
+        if (report.scheduled > 0) {
+          setDoubanRefreshText(`正在增量获取豆瓣信息：${report.scheduled} 本`);
+          window.setTimeout(() => setDoubanRefreshText(null), 8000);
+        }
+      })
+      .catch(() => {});
   }, []);
 
   useEffect(() => {
@@ -78,6 +96,74 @@ function AppShell() {
       onClose={() => setAiSettingsOpen(false)}
     />
   ) : null;
+
+  const globalHelpPanel = helpOpen ? (
+    <HelpPanel onClose={() => setHelpOpen(false)} />
+  ) : null;
+
+  const globalBookmarksPanel = (
+    <GlobalBookmarksPanel
+      open={bookmarksOpen}
+      onClose={() => setBookmarksOpen(false)}
+      onOpenBook={(book, initialSpine, initialScrollY) =>
+        setView({
+          kind: "reader",
+          book,
+          initialSpine,
+          initialScrollY,
+          returnTo: "library",
+        })
+      }
+    />
+  );
+
+  const globalRecommendPanel = recommendOpen ? (
+    <RecommendPanel
+      onOpenBook={(book) => {
+        setRecommendOpen(false);
+        setView({
+          kind: "reader",
+          book,
+          returnTo: "library",
+        });
+      }}
+      onClose={() => setRecommendOpen(false)}
+    />
+  ) : null;
+
+  async function setCurrentBookRating(rating: number | null) {
+    if (view.kind !== "reader") return;
+    const bookId = view.book.id;
+    setView({ ...view, book: { ...view.book, user_rating: rating } });
+    try {
+      await ipc.setBookRating(bookId, rating);
+    } catch {
+      setView({ ...view });
+    }
+  }
+
+  const navigateSection = (section: AppSection) => {
+    setView({ kind: section });
+  };
+
+  const activeSection: AppSection =
+    view.kind === "reader" ? view.returnTo : view.kind;
+
+  function renderWorkspace(children: React.ReactNode) {
+    return (
+      <div className="app-frame app-workspace">
+        <AppSidebar
+          active={activeSection}
+          onNavigate={navigateSection}
+          onOpenRecommend={() => setRecommendOpen(true)}
+          onOpenBookmarks={() => setBookmarksOpen(true)}
+          onOpenAiSettings={() => setAiSettingsOpen(true)}
+          onOpenHelp={() => setHelpOpen(true)}
+        />
+        <div className="app-workspace-main">{children}</div>
+      </div>
+    );
+  }
 
   // C6: 命令面板可达的导航 + 打开书 — 由 App 注入，CommandPalette 不直接 setView
   const globalCommandPalette = (
@@ -147,6 +233,9 @@ function AppShell() {
             bookId={view.book.id}
             aiSettings={aiSettings}
             onOpenAiSettings={() => setAiSettingsOpen(true)}
+            onOpenHelp={() => setHelpOpen(true)}
+            bookRating={view.book.user_rating}
+            onRateBook={setCurrentBookRating}
             initialSpine={view.initialSpine}
             initialScrollY={view.initialScrollY}
             initialHighlightId={view.initialHighlight}
@@ -154,6 +243,9 @@ function AppShell() {
             onBack={onBack}
           />
           {globalSettingsPanel}
+          {globalHelpPanel}
+          {globalBookmarksPanel}
+          {globalRecommendPanel}
           {globalCommandPalette}
           {globalFullTextSearch}
         </>
@@ -167,6 +259,9 @@ function AppShell() {
           bookId={view.book.id}
           aiSettings={aiSettings}
           onOpenAiSettings={() => setAiSettingsOpen(true)}
+          onOpenHelp={() => setHelpOpen(true)}
+          bookRating={view.book.user_rating}
+          onRateBook={setCurrentBookRating}
           initialSpine={view.initialSpine}
           initialScrollY={view.initialScrollY}
           initialHighlightId={view.initialHighlight}
@@ -174,6 +269,9 @@ function AppShell() {
           onBack={onBack}
         />
         {globalSettingsPanel}
+        {globalHelpPanel}
+        {globalBookmarksPanel}
+        {globalRecommendPanel}
       </>
     );
   }
@@ -181,20 +279,26 @@ function AppShell() {
   if (view.kind === "notes") {
     return (
       <>
-        <NotesView
-          onBack={() => setView({ kind: "library" })}
-          onOpenBookAtHighlight={(book, spineIdx, hlId) =>
-            setView({
-              kind: "reader",
-              book,
-              initialSpine: spineIdx,
-              initialHighlight: hlId,
-              returnTo: "notes",
-            })
-          }
-        />
+        {renderWorkspace(
+          <NotesView
+            onBack={() => setView({ kind: "library" })}
+            onOpenBookAtHighlight={(book, spineIdx, hlId) =>
+              setView({
+                kind: "reader",
+                book,
+                initialSpine: spineIdx,
+                initialHighlight: hlId,
+                returnTo: "notes",
+              })
+            }
+          />,
+        )}
         {globalCommandPalette}
         {globalFullTextSearch}
+        {globalSettingsPanel}
+        {globalHelpPanel}
+        {globalBookmarksPanel}
+        {globalRecommendPanel}
       </>
     );
   }
@@ -202,9 +306,13 @@ function AppShell() {
   if (view.kind === "music") {
     return (
       <>
-        <MusicView onBack={() => setView({ kind: "library" })} />
+        {renderWorkspace(<MusicView onBack={() => setView({ kind: "library" })} />)}
         {globalCommandPalette}
         {globalFullTextSearch}
+        {globalSettingsPanel}
+        {globalHelpPanel}
+        {globalBookmarksPanel}
+        {globalRecommendPanel}
       </>
     );
   }
@@ -212,42 +320,60 @@ function AppShell() {
   if (view.kind === "stats") {
     return (
       <>
-        <StatsView
-          onBack={() => setView({ kind: "library" })}
-          onOpenBook={(book) =>
-            setView({
-              kind: "reader",
-              book,
-              returnTo: "stats",
-            })
-          }
-        />
+        {renderWorkspace(
+          <StatsView
+            onBack={() => setView({ kind: "library" })}
+            onOpenBook={(book) =>
+              setView({
+                kind: "reader",
+                book,
+                returnTo: "stats",
+              })
+            }
+          />,
+        )}
         {globalCommandPalette}
         {globalFullTextSearch}
+        {globalSettingsPanel}
+        {globalHelpPanel}
+        {globalBookmarksPanel}
+        {globalRecommendPanel}
       </>
     );
   }
 
   return (
     <>
-      <LibraryView
-        onOpenBook={(book, initialSpine, initialScrollY) =>
-          setView({
-            kind: "reader",
-            book,
-            initialSpine,
-            initialScrollY,
-            returnTo: "library",
-          })
-        }
-        onOpenNotes={() => setView({ kind: "notes" })}
-        onOpenMusic={() => setView({ kind: "music" })}
-        onOpenStats={() => setView({ kind: "stats" })}
-        onOpenAiSettings={() => setAiSettingsOpen(true)}
-      />
+      {renderWorkspace(
+        <LibraryView
+          onOpenBook={(book, initialSpine, initialScrollY) =>
+            setView({
+              kind: "reader",
+              book,
+              initialSpine,
+              initialScrollY,
+              returnTo: "library",
+            })
+          }
+          onOpenNotes={() => setView({ kind: "notes" })}
+          onOpenMusic={() => setView({ kind: "music" })}
+          onOpenStats={() => setView({ kind: "stats" })}
+          onOpenRecommend={() => setRecommendOpen(true)}
+          onOpenAiSettings={() => setAiSettingsOpen(true)}
+          onOpenHelp={() => setHelpOpen(true)}
+        />,
+      )}
       {globalSettingsPanel}
+      {globalHelpPanel}
+      {globalBookmarksPanel}
+      {globalRecommendPanel}
       {globalCommandPalette}
       {globalFullTextSearch}
+      {doubanRefreshText && (
+        <div className="fixed bottom-4 right-4 z-50 rounded-md border border-[var(--color-paper-edge)] bg-[var(--color-paper)]/95 px-3 py-2 text-xs text-[var(--color-ink)] shadow-xl backdrop-blur">
+          {doubanRefreshText}
+        </div>
+      )}
     </>
   );
 }

@@ -23,9 +23,9 @@ pub enum HuffmanError {
 }
 
 type HuffmanDictionary = Vec<Option<(Vec<u8>, bool)>>;
-type CodeDictionary = [(u8, bool, u32); 256];
-type MinCodesMapping = [u32; 33];
-type MaxCodesMapping = [u32; 33];
+type CodeDictionary = [(u8, bool, u64); 256];
+type MinCodesMapping = [u64; 33];
+type MaxCodesMapping = [u64; 33];
 
 fn read_u64_be_at(data: &[u8], pos: usize) -> HuffmanResult<u64> {
     let end = pos + 8;
@@ -69,7 +69,7 @@ impl Default for HuffmanDecoder {
             dictionary: vec![],
             code_dict: [(0, false, 0); 256],
             min_codes: [0; 33],
-            max_codes: [u32::MAX; 33],
+            max_codes: [u64::from(u32::MAX); 33],
         }
     }
 }
@@ -85,7 +85,8 @@ impl HuffmanDecoder {
         for code in self.code_dict.iter_mut() {
             let v = reader.read_u32_be()?;
             // 0 < code_len <= 32, term is T or F, max_code is u24 pretending to be u32.
-            let (code_len, term, mut max_code) = ((v & 0x1F) as u8, (v & 0x80) == 0x80, v >> 8);
+            let (code_len, term, mut max_code) =
+                ((v & 0x1F) as u8, (v & 0x80) == 0x80, (v >> 8) as u64);
             if code_len == 0 {
                 return Err(HuffmanError::CodeLenOutOfBounds);
             }
@@ -107,9 +108,9 @@ impl HuffmanDecoder {
         reader.set_position(offset)?;
 
         for code_len in 1..=32 {
-            self.min_codes[code_len] = reader.read_u32_be()? << (32 - code_len);
+            self.min_codes[code_len] = (reader.read_u32_be()? as u64) << (32 - code_len);
             self.max_codes[code_len] =
-                ((reader.read_u32_be()? + 1) << (32 - code_len)).saturating_sub(1);
+                (((reader.read_u32_be()? as u64) + 1) << (32 - code_len)).saturating_sub(1);
         }
         Ok(())
     }
@@ -205,7 +206,7 @@ impl HuffmanDecoder {
             }
 
             // Read maximum of 32 bits from x.
-            let code = ((x >> n) & 0xFFFF_FFFF) as u32;
+            let code = (x >> n) & 0xFFFF_FFFF;
             // Get value from dict1.
             let (code_len, term, mut max_code) = self.code_dict[(code >> 24) as usize];
 
@@ -227,7 +228,7 @@ impl HuffmanDecoder {
                 break;
             }
 
-            let raw_index = ((max_code as i64 - code as i64) >> (32 - code_len)) as isize;
+            let raw_index = ((max_code as i128 - code as i128) >> (32 - code_len)) as isize;
             // [AIreader patch] 关键修复: 原实现用 std::mem::take 把 entry 置 None
             // → 递归 unpack 同一 phrase 时报 InvalidDictionaryIndex.
             // (实测: 多本中文 AZW3 Huff 解码全挂在这里, 用户报"0 字节正文".)

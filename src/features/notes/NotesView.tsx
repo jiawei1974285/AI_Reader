@@ -38,6 +38,9 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
   // C7: AI 笔记
   const [aiNotes, setAiNotes] = useState<AiNoteWithBook[]>([]);
   const [aiLoading, setAiLoading] = useState(false);
+  const [activeBookId, setActiveBookId] = useState<number | null>(null);
+  const [activeColor, setActiveColor] = useState<string | null>(null);
+  const [timeFilter, setTimeFilter] = useState<"all" | "week" | "month">("all");
 
   // Load all highlights (with debouncing for the search box)
   useEffect(() => {
@@ -96,26 +99,69 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
     }
   }
 
+  const bookOptions = useMemo(() => {
+    const map = new Map<number, string>();
+    for (const item of items) map.set(item.book_id, item.book_title);
+    for (const note of aiNotes) map.set(note.book_id, note.book_title);
+    return Array.from(map.entries()).sort((a, b) =>
+      a[1].localeCompare(b[1], "zh-Hans-CN"),
+    );
+  }, [items, aiNotes]);
+
+  const visibleItems = useMemo(() => {
+    const since =
+      timeFilter === "week"
+        ? Date.now() - 7 * 86_400_000
+        : timeFilter === "month"
+          ? Date.now() - 30 * 86_400_000
+          : 0;
+    return items.filter((item) => {
+      if (activeBookId !== null && item.book_id !== activeBookId) return false;
+      if (activeColor !== null && item.color !== activeColor) return false;
+      if (since > 0 && item.updated_at < since) return false;
+      return true;
+    });
+  }, [activeBookId, activeColor, items, timeFilter]);
+
+  const visibleAiNotes = useMemo(() => {
+    const since =
+      timeFilter === "week"
+        ? Date.now() - 7 * 86_400_000
+        : timeFilter === "month"
+          ? Date.now() - 30 * 86_400_000
+          : 0;
+    return aiNotes.filter((note) => {
+      if (activeBookId !== null && note.book_id !== activeBookId) return false;
+      if (since > 0 && note.created_at < since) return false;
+      return true;
+    });
+  }, [activeBookId, aiNotes, timeFilter]);
+
+  const selectedBook =
+    activeBookId !== null ? books.get(activeBookId) ?? null : null;
+
   // Group items by book
   const grouped = useMemo(() => {
     const m = new Map<number, HighlightWithBook[]>();
-    for (const it of items) {
+    for (const it of visibleItems) {
       const list = m.get(it.book_id) ?? [];
       list.push(it);
       m.set(it.book_id, list);
     }
     return Array.from(m.entries());
-  }, [items]);
+  }, [visibleItems]);
 
   return (
-    <div className="app-frame flex flex-col">
-      <header className="studio-header px-6 py-4 flex items-center justify-between gap-4">
+    <div className="page-shell">
+      <header className="page-topbar">
         <div className="min-w-0">
           <h2 className="studio-title text-2xl leading-tight">
-            笔记
+            笔记复盘
           </h2>
           <p className="text-xs studio-subtle mt-0.5">
-            {loading ? "搜索中…" : `${items.length} 条标注，跨 ${grouped.length} 本书`}
+            {loading
+              ? "搜索中…"
+              : `${visibleItems.length} 条标注，${visibleAiNotes.length} 条 AI 笔记`}
           </p>
           {/* C7: 标注 / AI 笔记 tab */}
           <div className="mt-2 flex items-center gap-1 text-xs">
@@ -141,7 +187,7 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
             </button>
           </div>
         </div>
-        <div className="flex items-center gap-2 text-xs flex-shrink-0">
+        <div className="page-topbar-actions text-xs flex-shrink-0">
           <input
             type="search"
             value={query}
@@ -153,8 +199,8 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
               CSV 适合直接灌进 Anki 当卡片用。 */}
           <button
             onClick={() => {
-              if (items.length === 0) return;
-              const md = buildAllBooksMarkdown(items);
+              if (visibleItems.length === 0) return;
+              const md = buildAllBooksMarkdown(visibleItems);
               const ts = new Date()
                 .toISOString()
                 .slice(0, 10)
@@ -165,7 +211,7 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
                 "text/markdown;charset=utf-8",
               );
             }}
-            disabled={items.length === 0}
+            disabled={visibleItems.length === 0}
             className="studio-button disabled:opacity-50 disabled:cursor-not-allowed"
             title="导出当前可见的所有标注为 Markdown"
           >
@@ -173,8 +219,8 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
           </button>
           <button
             onClick={() => {
-              if (items.length === 0) return;
-              const csv = buildAnkiCsv(items);
+              if (visibleItems.length === 0) return;
+              const csv = buildAnkiCsv(visibleItems);
               const ts = new Date()
                 .toISOString()
                 .slice(0, 10)
@@ -185,27 +231,92 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
                 "text/csv;charset=utf-8",
               );
             }}
-            disabled={items.length === 0}
+            disabled={visibleItems.length === 0}
             className="studio-button disabled:opacity-50 disabled:cursor-not-allowed"
             title="导出当前可见的所有标注为 Anki 卡片 (CSV)"
           >
             导出 Anki
           </button>
-          <button
-            onClick={onBack}
-            className="studio-button"
-          >
-            返回书架
-          </button>
         </div>
       </header>
 
-      <div className="flex-1 overflow-auto px-8 py-6">
+      <div className="notes-workbench">
+        <aside className="notes-filter-panel">
+          <div className="companion-section-title">书籍</div>
+          <button
+            onClick={() => setActiveBookId(null)}
+            className={`notes-filter-item ${
+              activeBookId === null ? "notes-filter-item-active" : ""
+            }`}
+          >
+            全部书籍
+            <span>{items.length}</span>
+          </button>
+          <div className="mt-2 space-y-1">
+            {bookOptions.slice(0, 14).map(([bookId, title]) => (
+              <button
+                key={bookId}
+                onClick={() => setActiveBookId(bookId)}
+                className={`notes-filter-item ${
+                  activeBookId === bookId ? "notes-filter-item-active" : ""
+                }`}
+              >
+                <span className="truncate">{title}</span>
+              </button>
+            ))}
+          </div>
+
+          <div className="companion-section-title mt-6">时间</div>
+          {[
+            ["all", "全部时间"],
+            ["week", "近 7 天"],
+            ["month", "近 30 天"],
+          ].map(([value, label]) => (
+            <button
+              key={value}
+              onClick={() => setTimeFilter(value as typeof timeFilter)}
+              className={`notes-filter-item ${
+                timeFilter === value ? "notes-filter-item-active" : ""
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+
+          <div className="companion-section-title mt-6">颜色</div>
+          <button
+            onClick={() => setActiveColor(null)}
+            className={`notes-filter-item ${
+              activeColor === null ? "notes-filter-item-active" : ""
+            }`}
+          >
+            全部颜色
+          </button>
+          {Object.entries(COLOR_HEX).map(([color, hex]) => (
+            <button
+              key={color}
+              onClick={() => setActiveColor(color)}
+              className={`notes-filter-item ${
+                activeColor === color ? "notes-filter-item-active" : ""
+              }`}
+            >
+              <span className="inline-flex items-center gap-2">
+                <span
+                  className="inline-block h-2.5 w-2.5 rounded-full"
+                  style={{ background: hex }}
+                />
+                {color}
+              </span>
+            </button>
+          ))}
+        </aside>
+
+        <main className="notes-main-panel">
         {error && <p className="text-sm text-red-600 mb-4">{error}</p>}
 
         {tab === "ai" ? (
           <AiNotesList
-            notes={aiNotes}
+            notes={visibleAiNotes}
             loading={aiLoading}
             books={books}
             onOpen={onOpenBookAtHighlight}
@@ -213,7 +324,7 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
           />
         ) : (
           <>
-        {!loading && items.length === 0 && (
+        {!loading && visibleItems.length === 0 && (
           <div className="text-center py-24 text-sm text-[var(--color-muted)]">
             {query
               ? `「${query}」没有匹配的标注`
@@ -331,6 +442,54 @@ export function NotesView({ onBack, onOpenBookAtHighlight }: Props) {
         </div>
           </>
         )}
+        </main>
+
+        <aside className="notes-inspector">
+          <div className="studio-title text-lg">
+            {selectedBook?.title ?? "复盘队列"}
+          </div>
+          <p className="mt-2 text-xs studio-subtle leading-relaxed">
+            {selectedBook
+              ? `${selectedBook.author || "未知作者"} · ${selectedBook.format.toUpperCase()}`
+              : "按书籍、时间、颜色和 AI 笔记聚合你的阅读材料。"}
+          </p>
+          <div className="mt-5 grid grid-cols-2 gap-2 text-center">
+            <div className="studio-panel px-3 py-3">
+              <div className="font-serif text-2xl">{visibleItems.length}</div>
+              <div className="text-[10px] studio-subtle mt-1">标注</div>
+            </div>
+            <div className="studio-panel px-3 py-3">
+              <div className="font-serif text-2xl">{visibleAiNotes.length}</div>
+              <div className="text-[10px] studio-subtle mt-1">AI 笔记</div>
+            </div>
+          </div>
+          <div className="companion-section">
+            <div className="companion-section-title">导出</div>
+            <button
+              onClick={() => {
+                if (visibleItems.length === 0) return;
+                downloadTextFile(
+                  "aireader-review.md",
+                  buildAllBooksMarkdown(visibleItems),
+                  "text/markdown;charset=utf-8",
+                );
+              }}
+              disabled={visibleItems.length === 0}
+              className="studio-button w-full disabled:opacity-50"
+            >
+              导出 Markdown
+            </button>
+          </div>
+          <div className="companion-section">
+            <div className="companion-section-title">AI 洞察</div>
+            <p className="text-sm leading-relaxed text-[var(--color-ink-soft)]">
+              当前筛选下的内容可以作为复盘材料：先看高亮密集的书，再处理保存过的 AI 问答。
+            </p>
+          </div>
+          <button onClick={onBack} className="studio-button mt-5 w-full">
+            返回书架
+          </button>
+        </aside>
       </div>
     </div>
   );

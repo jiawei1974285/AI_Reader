@@ -4,6 +4,7 @@ use crate::library::douban;
 use crate::library::scanner::{self, ScanReport};
 use crate::library::watcher;
 use crate::state::AppState;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::State;
@@ -80,10 +81,178 @@ pub fn scan_library(state: State<AppState>, app: tauri::AppHandle) -> Result<Sca
     result
 }
 
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ImportDroppedBooksReport {
+    pub received: usize,
+    pub imported: usize,
+    pub skipped_unsupported: usize,
+    pub skipped_duplicate: usize,
+    pub failed: usize,
+}
+
+#[tauri::command]
+#[tracing::instrument(skip_all)]
+pub fn import_dropped_books(
+    paths: Vec<String>,
+    state: State<AppState>,
+    app: tauri::AppHandle,
+) -> Result<ImportDroppedBooksReport, String> {
+    use tauri::Manager;
+    let app_data = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let covers_dir = app_data.join("covers");
+    let root = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        db::config_get(&conn, "library_root")
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Library root not configured".to_string())?
+    };
+    let root = PathBuf::from(root);
+    fs::create_dir_all(&root).map_err(|e| format!("创建书库目录失败: {e}"))?;
+    let root_canon = root.canonicalize().unwrap_or_else(|_| root.clone());
+
+    let mut report = ImportDroppedBooksReport {
+        received: paths.len(),
+        imported: 0,
+        skipped_unsupported: 0,
+        skipped_duplicate: 0,
+        failed: 0,
+    };
+
+    for raw in paths {
+        let source = PathBuf::from(raw);
+        if source.is_dir() {
+            let base_name = source
+                .file_name()
+                .map(|s| s.to_os_string())
+                .unwrap_or_else(|| "dropped-books".into());
+            let base_dest = unique_path(&root.join(base_name));
+            let mut copied_any = false;
+            for entry in walkdir::WalkDir::new(&source)
+                .follow_links(false)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                if !entry.file_type().is_file() {
+                    continue;
+                }
+                let path = entry.path();
+                if !is_supported_book_file(path) {
+                    report.skipped_unsupported += 1;
+                    continue;
+                }
+                let Ok(rel) = path.strip_prefix(&source) else {
+                    report.failed += 1;
+                    continue;
+                };
+                let dest = base_dest.join(rel);
+                match copy_book_file(path, &dest, &root_canon) {
+                    CopyOutcome::Imported => {
+                        report.imported += 1;
+                        copied_any = true;
+                    }
+                    CopyOutcome::Duplicate => report.skipped_duplicate += 1,
+                    CopyOutcome::Failed => report.failed += 1,
+                }
+            }
+            if !copied_any && base_dest.exists() {
+                let _ = fs::remove_dir_all(&base_dest);
+            }
+        } else if source.is_file() {
+            if !is_supported_book_file(&source) {
+                report.skipped_unsupported += 1;
+                continue;
+            }
+            let Some(name) = source.file_name() else {
+                report.failed += 1;
+                continue;
+            };
+            let dest = unique_path(&root.join(name));
+            match copy_book_file(&source, &dest, &root_canon) {
+                CopyOutcome::Imported => report.imported += 1,
+                CopyOutcome::Duplicate => report.skipped_duplicate += 1,
+                CopyOutcome::Failed => report.failed += 1,
+            }
+        } else {
+            report.failed += 1;
+        }
+    }
+
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    let _ = scanner::scan(&conn, &root, Some(&covers_dir))?;
+    Ok(report)
+}
+
+enum CopyOutcome {
+    Imported,
+    Duplicate,
+    Failed,
+}
+
+fn copy_book_file(source: &Path, dest: &Path, root_canon: &Path) -> CopyOutcome {
+    let source_canon = source.canonicalize().unwrap_or_else(|_| source.to_path_buf());
+    if source_canon.starts_with(root_canon) {
+        return CopyOutcome::Duplicate;
+    }
+    if let Some(parent) = dest.parent() {
+        if fs::create_dir_all(parent).is_err() {
+            return CopyOutcome::Failed;
+        }
+    }
+    match fs::copy(source, dest) {
+        Ok(_) => CopyOutcome::Imported,
+        Err(_) => CopyOutcome::Failed,
+    }
+}
+
+fn is_supported_book_file(path: &Path) -> bool {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .map(|ext| {
+            matches!(
+                ext.to_ascii_lowercase().as_str(),
+                "epub" | "txt" | "pdf" | "docx" | "mobi" | "azw" | "azw3"
+            )
+        })
+        .unwrap_or(false)
+}
+
+fn unique_path(path: &Path) -> PathBuf {
+    if !path.exists() {
+        return path.to_path_buf();
+    }
+    let parent = path.parent().unwrap_or_else(|| Path::new(""));
+    let stem = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("book");
+    let ext = path.extension().and_then(|s| s.to_str());
+    for n in 2..10_000 {
+        let filename = match ext {
+            Some(ext) => format!("{stem} ({n}).{ext}"),
+            None => format!("{stem} ({n})"),
+        };
+        let candidate = parent.join(filename);
+        if !candidate.exists() {
+            return candidate;
+        }
+    }
+    path.to_path_buf()
+}
+
 #[tauri::command]
 pub fn list_books(state: State<AppState>) -> Result<Vec<db::Book>, String> {
     let conn = state.db.get().map_err(|e| e.to_string())?;
     db::list_books(&conn).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn set_book_rating(
+    book_id: i64,
+    rating: Option<i64>,
+    state: State<AppState>,
+) -> Result<(), String> {
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::set_book_rating(&conn, book_id, rating).map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -93,6 +262,45 @@ pub fn get_douban_metadata(
 ) -> Result<Option<db::DoubanMetadata>, String> {
     let conn = state.db.get().map_err(|e| e.to_string())?;
     db::get_douban_metadata(&conn, book_id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub async fn refresh_douban_book_metadata(
+    book_id: i64,
+    state: State<'_, AppState>,
+) -> Result<db::DoubanMetadata, String> {
+    let book = {
+        let conn = state.db.get().map_err(|e| e.to_string())?;
+        if let Some(metadata) = db::get_douban_metadata(&conn, book_id).map_err(|e| e.to_string())?
+        {
+            if !has_css_contaminated_metadata(&metadata) {
+                return Ok(metadata);
+            }
+        }
+        db::get_book_by_id(&conn, book_id)
+            .map_err(|e| e.to_string())?
+            .ok_or_else(|| "Book not found".to_string())?
+    };
+    let metadata = douban::fetch_book_metadata(&book).await;
+    let conn = state.db.get().map_err(|e| e.to_string())?;
+    db::upsert_douban_metadata(&conn, &metadata).map_err(|e| e.to_string())?;
+    Ok(metadata)
+}
+
+fn has_css_contaminated_metadata(metadata: &db::DoubanMetadata) -> bool {
+    metadata
+        .summary
+        .as_deref()
+        .map(has_css_contaminated_summary)
+        .unwrap_or(false)
+}
+
+fn has_css_contaminated_summary(summary: &str) -> bool {
+    summary.contains('{')
+        && summary.contains('}')
+        && (summary.contains("text-indent")
+            || summary.contains("word-break")
+            || summary.contains(".intro"))
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -616,8 +824,7 @@ pub fn export_highlights_epub(
             .into_iter()
             .find(|b| b.id == book_id)
             .ok_or_else(|| "找不到这本书".to_string())?;
-        let hs_plain =
-            db::list_highlights_by_book(&conn, book_id).map_err(|e| e.to_string())?;
+        let hs_plain = db::list_highlights_by_book(&conn, book_id).map_err(|e| e.to_string())?;
         // 把 Highlight 升级成 HighlightWithBook（统一 export 模块的入参）
         let hs: Vec<db::HighlightWithBook> = hs_plain
             .into_iter()
@@ -661,8 +868,7 @@ pub fn export_highlights_csv(
                 .into_iter()
                 .find(|b| b.id == bid)
                 .ok_or_else(|| "找不到这本书".to_string())?;
-            let plain =
-                db::list_highlights_by_book(&conn, bid).map_err(|e| e.to_string())?;
+            let plain = db::list_highlights_by_book(&conn, bid).map_err(|e| e.to_string())?;
             plain
                 .into_iter()
                 .map(|h| db::HighlightWithBook {

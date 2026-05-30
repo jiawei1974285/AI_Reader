@@ -1,11 +1,14 @@
 import { convertFileSrc } from "@tauri-apps/api/core";
+import { openUrl } from "@tauri-apps/plugin-opener";
 import { useState } from "react";
 import { ipc, type Book, type DoubanMetadata } from "@/lib/ipc";
+import { BookRating } from "./BookRating";
 
 type Props = {
   book: Book;
   onClick: () => void;
   onRemove?: () => void;
+  onRate?: (rating: number | null) => void;
 };
 
 const PLACEHOLDER_HUES = [
@@ -62,9 +65,22 @@ function placeholderColors(title: string): [string, string] {
   return PLACEHOLDER_HUES[idx] as [string, string];
 }
 
-export function BookCard({ book, onClick, onRemove }: Props) {
+function hasCssContaminatedSummary(metadata: DoubanMetadata | null): boolean {
+  const summary = metadata?.summary ?? "";
+  return (
+    summary.includes("{") &&
+    summary.includes("}") &&
+    (summary.includes("text-indent") ||
+      summary.includes("word-break") ||
+      summary.includes(".intro"))
+  );
+}
+
+export function BookCard({ book, onClick, onRemove, onRate }: Props) {
   const [douban, setDouban] = useState<DoubanMetadata | null>(null);
   const [doubanLoaded, setDoubanLoaded] = useState(false);
+  const [doubanLoading, setDoubanLoading] = useState(false);
+  const [doubanError, setDoubanError] = useState<string | null>(null);
   const hasCover = !!book.cover_path;
   const coverSrc = hasCover ? convertFileSrc(book.cover_path as string) : "";
   const [c1, c2] = placeholderColors(book.title || book.file_path);
@@ -73,10 +89,33 @@ export function BookCard({ book, onClick, onRemove }: Props) {
   function loadDoubanMetadata() {
     if (doubanLoaded) return;
     setDoubanLoaded(true);
+    setDoubanLoading(true);
+    setDoubanError(null);
     ipc
       .getDoubanMetadata(book.id)
-      .then((metadata) => setDouban(metadata))
-      .catch(() => setDouban(null));
+      .then(async (metadata) => {
+        if (metadata?.status === "ok" && !hasCssContaminatedSummary(metadata)) {
+          setDouban(metadata);
+          return;
+        }
+        if (metadata && !hasCssContaminatedSummary(metadata)) {
+          setDouban(metadata);
+          if (metadata.status !== "ok") {
+            setDoubanError(metadata.error || metadata.status);
+          }
+          return;
+        }
+        const refreshed = await ipc.refreshDoubanBookMetadata(book.id);
+        setDouban(refreshed);
+        if (refreshed.status !== "ok") {
+          setDoubanError(refreshed.error || refreshed.status);
+        }
+      })
+      .catch((err) => {
+        setDouban(null);
+        setDoubanError(err instanceof Error ? err.message : "获取失败");
+      })
+      .finally(() => setDoubanLoading(false));
   }
 
   const hasDoubanInfo =
@@ -161,7 +200,17 @@ export function BookCard({ book, onClick, onRemove }: Props) {
         <p className="text-[11px] text-[var(--color-ink-soft)] line-clamp-1 min-w-0">
           {book.author || "佚名"}
         </p>
-        <div className="mt-auto flex items-center justify-end gap-2 pt-1">
+        <div className="mt-auto flex items-center justify-between gap-2 pt-1">
+          {onRate ? (
+            <BookRating
+              value={book.user_rating}
+              onChange={onRate}
+              size="sm"
+              label={`给《${book.title}》评分`}
+            />
+          ) : (
+            <span />
+          )}
           <p className="text-[10px] text-[var(--color-muted)] tabular-nums flex-shrink-0">
             {book.read_time_ms > 60_000
               ? formatDuration(book.read_time_ms)
@@ -193,9 +242,11 @@ export function BookCard({ book, onClick, onRemove }: Props) {
               {douban.douban_url && (
                 <a
                   href={douban.douban_url}
-                  target="_blank"
-                  rel="noreferrer"
-                  onClick={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    openUrl(douban.douban_url as string).catch(() => {});
+                  }}
                   className="inline-flex text-[11px] text-[var(--color-accent)] hover:underline"
                 >
                   打开豆瓣
@@ -204,7 +255,13 @@ export function BookCard({ book, onClick, onRemove }: Props) {
             </div>
           ) : (
             <p className="text-[11px] text-[var(--color-muted)]">
-              {doubanLoaded ? "暂无豆瓣信息" : "读取豆瓣信息..."}
+              {doubanLoading
+                ? "正在获取豆瓣信息..."
+                : doubanError
+                  ? "豆瓣信息获取失败"
+                  : doubanLoaded
+                    ? "暂无豆瓣信息"
+                    : "读取豆瓣信息..."}
             </p>
           )}
         </div>

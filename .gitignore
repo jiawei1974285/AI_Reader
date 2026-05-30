@@ -44,4 +44,5 @@ desktop.ini
 
 # Claude Code / Cursor / dev tooling state (per-user)
 .claude/
+.codex-run/
 .cursor/
